@@ -1,0 +1,2214 @@
+{#
+  Endüstriyel ürün sunum sayfası — Three.js.
+
+  Sayfanın taşıdığı sözleşme GLB'den gelir: her parça düğümü `extras` içinde
+  pid (parça kimliği), grp (X-Ray grubu), ax (montaj ekseni), d (mesafe
+  çarpanı) ve st (patlatma aşaması) taşır. Patlatma bu yüzden bir efekt değil,
+  montaj sırasının geri oynatılmasıdır.
+
+  Üç sunum kararı:
+  * Parçalama tarayıcıda hesaplanır (GLB'ye animasyon gömülmez). Böylece
+    kaydırıcı sürekli, aşamalar gecikmeli ve yön her parçanın kendi eksenidir.
+  * X-Ray yalnızca `grp == "housing"` parçalarını saydamlaştırır; iç mekanizma
+    opak kalır ve kenar çizgileri eklenir — kesit almadan içeriyi göstermenin
+    en okunur yolu.
+  * Malzemeler yüklemede klonlanır. Aynı malzemeyi paylaşan iki parça (gövde
+    ve kapak) aksi halde X-Ray'de birlikte saydamlaşırdı.
+#}<!doctype html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{{ identity.product_name }}{% if cad.params and cad.params.dn %} · DN{{ cad.params.dn }}{% endif %}</title>
+{# Gömülü simge: paketin tek dış isteği buydu ve her açılışta konsola
+   404 düşüyordu. Veri adresi olarak gömmek hem isteği hem hatayı siler. #}
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1821'/%3E%3Cpath d='M6 19h20M16 19V9M10 23h12' stroke='%235da8e0' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3Ccircle cx='16' cy='7' r='3' fill='%235da8e0'/%3E%3C/svg%3E">
+<meta name="description" content="{{ identity.summary|truncate(180) }}">
+<style>
+:root{
+  --bg:#080a0d; --bg2:#0e1116; --panel:#11151b; --panel2:#161b22;
+  --line:#222933; --line2:#2d3643;
+  --text:#e9eef5; --dim:#8c97a6; --dim2:#616c7c;
+  --accent:#4cb3e4; --accent2:#2a7fa8; --amber:#e8a33d; --ok:#4ec08a;
+  --r:10px; --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);overflow:hidden;
+  font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---------- yerleşim ---------- */
+#app{display:grid;height:100%;
+  grid-template-rows:auto 1fr;
+  grid-template-columns:1fr 374px;
+  grid-template-areas:"head head" "stage panel"}
+/* Başlık şeridi bilinçli olarak ALÇAK: sayfanın işi ürünü göstermek, metni
+   değil. Önceki yükseklikte (iki satır başlık + alt başlık + şerit) tuval
+   masaüstünde ekranın %70'ine iniyordu; ürün küçük ve uzak duruyordu. */
+header{grid-area:head;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:7px 18px;background:linear-gradient(180deg,#10141a,#0c1014);
+  border-bottom:1px solid var(--line)}
+#stage{grid-area:stage;position:relative;overflow:hidden;
+  background:#06080b}
+aside{grid-area:panel;background:var(--panel);border-left:1px solid var(--line);
+  overflow-y:auto;overscroll-behavior:contain}
+
+/* ---------- başlık ---------- */
+.title{min-width:220px;flex:1 1 320px}
+.eyebrow{font-size:9.5px;letter-spacing:.17em;text-transform:uppercase;
+  color:var(--accent);font-weight:600;margin-bottom:1px}
+h1{margin:0;font-size:clamp(14px,1.6vw,17px);font-weight:600;letter-spacing:-.01em;
+  line-height:1.25}
+/* Alt başlık özet metnini tekrarlıyordu; yan panelde zaten var. */
+.subtitle{display:none}
+.chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.chip{display:flex;flex-direction:column;gap:0;padding:3px 9px;border-radius:7px;
+  background:#161c24;border:1px solid var(--line2);min-width:68px}
+.chip b{font:600 13px/1.25 var(--mono);letter-spacing:.01em}
+.chip span{font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--dim2)}
+.badge{padding:4px 10px;border-radius:999px;font-size:11px;font-weight:600;
+  border:1px solid}
+.badge.rep{color:var(--amber);border-color:#5a4418;background:#201909}
+
+/* ---------- sahne ---------- */
+canvas{display:block;width:100%;height:100%;outline:none}
+#overlay{position:absolute;inset:0;pointer-events:none}
+#leaders{position:absolute;inset:0;width:100%;height:100%}
+.label{position:absolute;transform:translate(-50%,-50%);white-space:nowrap;
+  padding:3px 9px;border-radius:7px;font:500 11.5px/1.3 var(--mono);
+  background:rgba(14,18,24,.92);border:1px solid var(--line2);color:var(--text);
+  pointer-events:auto;cursor:pointer;backdrop-filter:blur(4px);
+  transition:border-color .15s,color .15s}
+.label:hover,.label.on{border-color:var(--accent);color:var(--accent)}
+/* Telefonda 20 etiket tek oluğa diziliyor; küçülmezse kadrajı kaplıyorlar. */
+@media (max-width:719px){.label{font-size:10px;padding:2px 6px}}
+.label i{color:var(--dim2);font-style:normal;margin-right:5px}
+.dot{position:absolute;width:5px;height:5px;border-radius:50%;background:var(--accent);
+  transform:translate(-50%,-50%);box-shadow:0 0 0 2px rgba(76,179,228,.22)}
+
+#hint{position:absolute;left:50%;top:9px;transform:translateX(-50%);
+  color:var(--dim2);font-size:11.5px;letter-spacing:.02em;pointer-events:none;
+  transition:opacity .5s}
+#scalebar{position:absolute;left:18px;bottom:104px;color:var(--dim2);
+  font:11px/1 var(--mono);pointer-events:none}
+#scalebar .bar{height:1px;background:var(--dim2);margin-bottom:5px;
+  border-left:1px solid var(--dim2);border-right:1px solid var(--dim2);
+  box-sizing:content-box;padding:3px 0 0}
+
+#loader{position:absolute;inset:0;display:grid;place-content:center;gap:16px;
+  justify-items:center;background:var(--bg);z-index:5;transition:opacity .5s;
+  padding:24px;text-align:center}
+#loader.gone{opacity:0;pointer-events:none}
+.ring{width:30px;height:30px;border:2px solid var(--line2);border-top-color:var(--accent);
+  border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loader p{margin:0;color:var(--dim);font:12px/1.4 var(--mono)}
+/* Gerçek ilerleme çubuğu: indirilen bayt / bilinen dosya boyutu. */
+#track{width:min(260px,70vw);height:3px;border-radius:3px;background:var(--line2);
+  overflow:hidden}
+#fill{height:100%;width:0%;border-radius:3px;
+  background:linear-gradient(90deg,var(--accent2),var(--accent));
+  transition:width .22s cubic-bezier(.22,.61,.36,1)}
+#loader.indeterminate #fill{width:35%;animation:slide 1.1s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+#lpct{font:600 13px/1 var(--mono);color:var(--text)}
+#lphase{font-size:11.5px;letter-spacing:.06em;color:var(--dim2)}
+#loader.failed{gap:0}
+#loader.failed .ring,#loader.failed #track,#loader.failed #lpct{display:none}
+.err-box{max-width:420px;border:1px solid #5a2a2a;background:#1c1012;border-radius:12px;
+  padding:18px 20px;text-align:left}
+.err-box h3{margin:0 0 7px;font-size:14px;color:#f08c8c;font-weight:600}
+.err-box p{margin:0 0 10px;color:var(--dim);font:12.5px/1.5 ui-sans-serif,system-ui}
+.err-box pre{margin:0 0 12px;padding:9px 10px;background:#120b0c;border-radius:7px;
+  color:var(--dim2);font:10.5px/1.5 var(--mono);white-space:pre-wrap;max-height:120px;
+  overflow:auto}
+.err-box button{padding:8px 15px;border-radius:8px;background:#2a1718;color:#f0a0a0;
+  border:1px solid #5a2a2a;font-size:12.5px;cursor:pointer}
+.err-box button:hover{background:#361c1e}
+/* Sahne yalnızca her şey hazır olduğunda belirir. */
+#view{opacity:0;transition:opacity .55s ease-out}
+#view.ready{opacity:1}
+
+/* ---------- alt kumanda paneli ---------- */
+#dock{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);
+  display:flex;align-items:center;gap:6px;padding:8px;max-width:calc(100% - 28px);
+  background:rgba(13,17,22,.86);border:1px solid var(--line2);border-radius:14px;
+  backdrop-filter:blur(14px);box-shadow:0 14px 44px rgba(0,0,0,.6);
+  overflow-x:auto;scrollbar-width:none}
+#dock::-webkit-scrollbar{display:none}
+.tool{display:flex;align-items:center;gap:7px;padding:8px 13px;border-radius:9px;
+  font-size:12.5px;font-weight:500;color:var(--dim);white-space:nowrap;
+  border:1px solid transparent;transition:background .15s,color .15s,border-color .15s}
+/* `display:flex` tarayıcının [hidden] kuralını eziyor: projeksiyon
+   kapalıyken gizlenmesi gereken "Foto doku" düğmesi yine de görünüyor ve
+   basınca hiçbir şey yapmıyordu. */
+.tool[hidden]{display:none}
+.tool:hover{background:#1a212a;color:var(--text)}
+.tool.on{background:rgba(76,179,228,.15);color:var(--accent);border-color:#2b5f7a}
+.tool svg{width:15px;height:15px;flex:none}
+.sep{width:1px;height:24px;background:var(--line2);margin:0 3px;flex:none}
+.slide{display:flex;align-items:center;gap:9px;padding:0 10px 0 4px}
+.slide input{-webkit-appearance:none;appearance:none;width:116px;height:3px;
+  border-radius:3px;background:var(--line2);outline:none}
+.slide input::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
+  border-radius:50%;background:var(--accent);cursor:pointer;
+  box-shadow:0 0 0 3px rgba(76,179,228,.2)}
+.slide input::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;
+  background:var(--accent);cursor:pointer}
+.slide b{font:600 11.5px/1 var(--mono);color:var(--dim);min-width:34px;text-align:right}
+
+/* ---------- sağ panel ---------- */
+section{border-bottom:1px solid var(--line);padding:16px 18px}
+section:last-child{border-bottom:0}
+h2{margin:0 0 11px;font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;
+  color:var(--dim2);font-weight:600}
+.photo{position:relative;border-radius:var(--r);overflow:hidden;background:#06080b;
+  border:1px solid var(--line)}
+.photo img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover}
+.thumbs{display:flex;gap:6px;margin-top:7px}
+.thumbs img{width:52px;height:40px;object-fit:cover;border-radius:6px;cursor:pointer;
+  border:1px solid var(--line);opacity:.55;transition:opacity .15s,border-color .15s}
+.thumbs img:hover,.thumbs img.on{opacity:1;border-color:var(--accent)}
+.caption{color:var(--dim2);font-size:11px;margin-top:7px}
+
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.k{color:var(--dim);width:45%;padding-right:12px}
+td.v{font-family:var(--mono);font-size:12px}
+
+.part{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;
+  border-radius:8px;text-align:left;transition:background .13s}
+.part:hover{background:#171d25}
+.part.on{background:rgba(76,179,228,.13);outline:1px solid #2b5f7a}
+.part .no{font:600 10.5px/1 var(--mono);color:var(--dim2);width:19px;flex:none}
+.part .sw{width:9px;height:9px;border-radius:2px;flex:none;border:1px solid rgba(255,255,255,.14)}
+.part .nm{flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.part .qt{font:11px/1 var(--mono);color:var(--dim2);flex:none}
+.grouphead{font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--dim2);margin:12px 0 4px;padding-left:8px}
+.grouphead:first-child{margin-top:0}
+
+#detail{margin-top:10px;padding:11px 12px;border-radius:var(--r);
+  background:#0d1117;border:1px solid var(--line2);font-size:12.5px}
+#detail h3{margin:0 0 6px;font-size:13px;font-weight:600}
+#detail .meta{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);
+  font:11.5px var(--mono);margin-bottom:7px}
+#detail p{margin:0;color:var(--dim);line-height:1.5}
+#detail .std{margin-top:7px;font:11px var(--mono);color:var(--accent)}
+
+ul.plain{margin:0;padding:0;list-style:none}
+ul.plain li{padding:5px 0 5px 15px;position:relative;color:var(--dim);font-size:12.5px;
+  border-bottom:1px solid var(--line)}
+ul.plain li:last-child{border-bottom:0}
+ul.plain li::before{content:"";position:absolute;left:2px;top:12px;width:4px;height:4px;
+  border-radius:50%;background:var(--dim2)}
+.tags{display:flex;flex-wrap:wrap;gap:6px}
+.tag{padding:3px 9px;border-radius:6px;background:#161c24;border:1px solid var(--line2);
+  font:11.5px var(--mono);color:var(--dim)}
+.note{color:var(--dim);font-size:12px;line-height:1.55}
+.warn{color:var(--amber);font-size:12px;line-height:1.5;padding:9px 11px;
+  background:#1b1509;border:1px solid #4a3a14;border-radius:8px}
+.bars{display:flex;flex-direction:column;gap:7px}
+.bar{display:grid;grid-template-columns:1fr auto;gap:3px 10px;font-size:12px}
+.bar .t{color:var(--dim)}
+.bar .n{font:11.5px var(--mono);color:var(--text)}
+.bar .track{grid-column:1/-1;height:3px;border-radius:3px;background:var(--line2);
+  overflow:hidden}
+.bar .fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent))}
+footer{padding:14px 18px 26px;color:var(--dim2);font-size:11px}
+
+/* ---------- mobil ---------- */
+@media (max-width:980px){
+  body{overflow:auto}
+  #app{grid-template-columns:1fr;grid-template-rows:auto 70vh auto;
+    grid-template-areas:"head" "stage" "panel";height:auto;min-height:100%}
+  aside{border-left:0;border-top:1px solid var(--line);overflow:visible}
+  header{padding:11px 16px}
+  .chips{gap:6px}
+  .chip{min-width:62px;padding:4px 9px}
+  #dock{bottom:12px;padding:7px;gap:4px}
+  .tool{padding:8px 11px}
+  .tool span{display:none}
+  .tool.keep span{display:inline}
+  .slide input{width:88px}
+  #scalebar{bottom:92px;left:14px}
+  section{padding:15px 16px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="title">
+      <div class="eyebrow">{{ ui.eyebrow }}</div>
+      <h1>{{ identity.product_name }}</h1>
+      <div class="subtitle">{{ identity.type_designation or identity.category }}</div>
+    </div>
+    <div class="chips">
+      {%- for c in chips %}
+      <div class="chip"><b>{{ c.value }}</b><span>{{ c.label }}</span></div>
+      {%- endfor %}
+      {%- if cad.representative %}
+      <span class="badge rep">{{ ui.representative }}</span>
+      {%- endif %}
+    </div>
+  </header>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="overlay"><svg id="leaders"></svg></div>
+    <div id="hint">{{ ui.hint }}</div>
+    <div id="scalebar"><div class="bar" id="sbar"></div><span id="slen">—</span></div>
+
+    <div id="loader" class="indeterminate">
+      <div class="ring"></div>
+      <div id="track"><div id="fill"></div></div>
+      <p id="lpct">{{ ui.loading }}</p>
+      <p id="lphase"></p>
+    </div>
+
+    <div id="dock">
+      <button class="tool keep" id="t-explode" title="E">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/>
+          <rect x="9.5" y="9.5" width="5" height="5" rx="1"/></svg>
+        <span id="explode-label">{{ ui.explode }}</span></button>
+      <div class="slide">
+        <input type="range" id="slider" min="0" max="100" value="0" aria-label="{{ ui.explode }}">
+        <b id="pct">0%</b>
+      </div>
+      <div class="sep"></div>
+      <button class="tool" id="t-xray" title="X">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4"/></svg>
+        <span>{{ ui.xray }}</span></button>
+      <button class="tool" id="t-photo" title="P" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/>
+          <path d="M3 16l5-5 4 4 3-3 6 6"/><circle cx="8.5" cy="9.5" r="1.4"/></svg>
+        <span>{{ ui.photo_texture }}</span></button>
+      <button class="tool" id="t-labels" title="L">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M4 7h10M4 12h16M4 17h7"/></svg>
+        <span>{{ ui.labels }}</span></button>
+      <button class="tool" id="t-spin" title="Space">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v4h-4"/></svg>
+        <span>{{ ui.spin }}</span></button>
+      <div class="sep"></div>
+      <button class="tool" id="t-reset" title="R">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M12 4v4M12 16v4M4 12h4M16 12h4"/>
+          <circle cx="12" cy="12" r="2.2"/></svg><span>{{ ui.reset }}</span></button>
+{# "Görüntü al" kaldırıldı: tarayıcının kendi ekran görüntüsü aynı işi
+   yapıyor, kumanda şeridinde yer açmak ise mobilde düğmelerin sığmasını
+   sağlıyor. Klavye kısayolu da kaldırıldı. #}
+      <button class="tool" id="t-share">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M10 13.5 14 10M9 7.5l2.6-2.6a3.7 3.7 0 0 1 5.2 5.2L14.5 12.5"/>
+          <path d="M15 16.5l-2.6 2.6a3.7 3.7 0 0 1-5.2-5.2L9.5 11.5"/></svg>
+        <span id="share-label">{{ ui.share }}</span></button>
+      <button class="tool" id="t-full" title="F">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round"><path d="M4 9V4h5M20 15v5h-5M20 9V4h-5M4 15v5h5"/></svg>
+        <span>{{ ui.fullscreen }}</span></button>
+    </div>
+  </div>
+
+  <aside>
+{# Müşteri fotoğrafı galerisi kaldırıldı. Fotoğraf artık yan panelde ikinci
+   kez gösterilmiyor; ZATEN 3B modelin üzerinde yansıtılıyor (bkz. fotoğraf
+   projeksiyonu). Aynı görseli iki kez göstermek paneli şişiriyor ve gözü
+   asıl üründen alıyordu. Dosyalar pakette duruyor — projeksiyon dokusu
+   onlardan okunuyor. #}
+    {%- if identity.summary %}
+    <section>
+      <h2>{{ ui.summary }}</h2>
+      <p class="caption">{{ identity.summary }}</p>
+    </section>
+    {%- endif %}
+
+    {%- if cad.representative %}
+    <section><p class="warn">{{ ui.representative_note }}</p></section>
+    {%- endif %}
+
+    {%- if specs %}
+    <section>
+      <h2>{{ ui.specs }}</h2>
+      <table>
+        {%- for s in specs %}
+        <tr><td class="k">{{ s.label }}</td><td class="v">{{ s.value }}</td></tr>
+        {%- endfor %}
+        {%- if spec.temperature_range %}
+        <tr><td class="k">Sıcaklık aralığı</td><td class="v">{{ spec.temperature_range }}</td></tr>
+        {%- endif %}
+      </table>
+    </section>
+    {%- endif %}
+
+    {%- if parts %}
+    <section>
+      <h2>{{ ui.parts }} <span style="color:var(--dim2)">· {{ parts|length }}</span></h2>
+      <div id="partlist"></div>
+      <div id="detail" hidden></div>
+    </section>
+    {%- endif %}
+
+    {%- if materials %}
+    <section>
+      <h2>{{ ui.materials }}</h2>
+      <div class="bars" id="matbars"></div>
+    </section>
+    {%- endif %}
+
+    <section>
+      <h2>{{ ui.model_info }}</h2>
+      <table>
+        <tr><td class="k">{{ ui.dimensions }}</td><td class="v">
+          {{ validation.size_mm[0]|round(0)|int }} × {{ validation.size_mm[1]|round(0)|int }} × {{ validation.size_mm[2]|round(0)|int }} mm</td></tr>
+        {%- if validation.mass_g %}
+        <tr><td class="k">{{ ui.total_mass }}</td><td class="v">
+          {{ (validation.mass_g / 1000)|round(2) }} kg</td></tr>
+        {%- endif %}
+        <tr><td class="k">Parça / örnek</td><td class="v">
+          {{ validation.parts }} / {{ validation.instances }}</td></tr>
+        {%- if validation.parts %}
+        <tr><td class="k">Katı doğrulama</td><td class="v"
+          style="color:{{ 'var(--ok)' if validation.all_solid else 'var(--amber)' }}">
+          {{ validation.solid_parts }}/{{ validation.parts }} {{ ui.solid }}</td></tr>
+        {%- endif %}
+        <tr><td class="k">Model kaynağı</td><td class="v">{{ cad.source }}</td></tr>
+      </table>
+      {%- if cad.match_reason %}
+      <p class="caption" style="margin-top:9px">{{ cad.match_reason }}</p>
+      {%- endif %}
+      {%- for n in cad.notes %}
+      <p class="caption">{{ n }}</p>
+      {%- endfor %}
+    </section>
+
+    {%- if standard_parts %}
+    <section>
+      <h2>{{ ui.standard_parts }}</h2>
+      <ul class="plain">{% for p in standard_parts %}<li>{{ p }}</li>{% endfor %}</ul>
+    </section>
+    {%- endif %}
+
+    {%- if applications %}
+    <section>
+      <h2>{{ ui.applications }}</h2>
+      <ul class="plain">{% for a in applications %}<li>{{ a }}</li>{% endfor %}</ul>
+    </section>
+    {%- endif %}
+
+    {%- if standards %}
+    <section>
+      <h2>{{ ui.standards }}</h2>
+      <div class="tags">{% for s in standards %}<span class="tag">{{ s }}</span>{% endfor %}</div>
+    </section>
+    {%- endif %}
+
+{# Kaynak linkleri kaldırıldı: müşteriye giden sunumda katalog/tedarikçi
+   adresleri işe yaramıyor, dış bağlantı ise sayfadan çıkış kapısı açıyor.
+   Veriler `cad.json` ve `metadata.json` içinde duruyor. #}
+    <footer>{{ generated }} · ajan3d</footer>
+  </aside>
+</div>
+
+<script type="application/json" id="data">{{ {
+  "parts": parts,
+  "groups": ui.groups,
+  "diagonal": diagonal_mm,
+  "hdri": hdri_file if has_hdri else "",
+  "hdri_bytes": hdri_bytes,
+  "model": model_file,
+  "model_bytes": model_bytes,
+  "draco": draco,
+  "draco_path": draco_path,
+  "projection": projection,
+  "projectors": projectors,
+  "pipeline": pipeline
+} | tojson }}</script>
+
+{#
+  Import map değerleri MUTLAKA "./", "../" veya "/" ile ya da mutlak adresle
+  başlamalı. Çıplak yazılan bir yol ("vendor/three/…") tarayıcı tarafından
+  bare specifier sayılır ve **bütün harita sessizce iptal edilir**: modül
+  "three"i çözemez, üst seviye kod hiç çalışmaz, yükleme ekranı sonsuza kadar
+  kalır. Tek hata mesajı konsoldadır. Gerçek tarayıcıda yeniden üretilip
+  düzeltildi; `tests/test_package.py` bu biçimi kilitliyor.
+#}
+<script type="importmap">
+{
+  "imports": {
+    "three": "{{ './vendor/three/three.module.min.js' if three_local else three_cdn + 'build/three.module.min.js' }}",
+    "three/addons/": "{{ './vendor/three/addons/' if three_local else three_cdn + 'examples/jsm/' }}"
+  }
+}
+</script>
+
+<script>
+/* Modül yüklemesi başarısız olursa sayfa sessizce donmasın: aşağıdaki modül
+   betiği hiç çalışmasa bile bu klasik betik çalışır ve hatayı ekrana basar. */
+(function () {
+  var shown = false;
+  function fail(message, detail) {
+    if (shown) return;
+    shown = true;
+    var el = document.getElementById('loader');
+    if (!el) return;
+    el.classList.add('failed');
+    el.innerHTML = '<div class="err-box"><h3>3D görüntüleyici başlatılamadı</h3>' +
+      '<p>' + String(message || '').replace(/[<>&]/g, '') + '</p>' +
+      (detail ? '<pre>' + String(detail).slice(0, 400).replace(/[<>&]/g, '') + '</pre>' : '') +
+      '<button onclick="location.reload()">Yeniden dene</button></div>';
+  }
+  window.__viewerFail = fail;
+  window.addEventListener('error', function (e) {
+    if (e.message && /module|import|specifier/i.test(e.message)) {
+      fail('Görüntüleyici kütüphanesi yüklenemedi.', e.message);
+    }
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    fail('Beklenmeyen bir hata oluştu.', e.reason && e.reason.message);
+  });
+  // Son çare: modül hiç çalışmadıysa (import map reddi gibi) kullanıcı
+  // sonsuza kadar "yükleniyor" ekranında kalmasın.
+  setTimeout(function () {
+    var el = document.getElementById('loader');
+    if (el && !el.classList.contains('gone') && !window.__viewerStarted) {
+      fail('Görüntüleyici başlatılamadı (zaman aşımı).',
+           'Tarayıcı 3D kütüphanesini yükleyemedi. Sayfayı yenilemeyi ya da ' +
+           'güncel bir tarayıcı kullanmayı deneyin.');
+    }
+  }, 12000);
+})();
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+
+/* Modül buraya kadar geldiyse import zinciri sağlam demektir; klasik betikteki
+   zaman aşımı koruması bu bayrağa bakıyor. */
+window.__viewerStarted = true;
+
+const DATA = JSON.parse(document.getElementById('data').textContent);
+const T = { shared: "{{ ui.shared }}", share: "{{ ui.share }}",
+            explode: "{{ ui.explode }}", assemble: "{{ ui.assemble }}",
+            qty: "{{ ui.qty }}", mass: "{{ ui.mass }}", material: "{{ ui.material }}" };
+
+/* ------------------------------------------------------------------ sahne */
+const canvas = document.getElementById('view');
+const stage = document.getElementById('stage');
+
+/* WebGL yoksa sessizce donmak yerine neden olduğunu söyle. */
+function hasWebGL() {
+  try {
+    const probe = document.createElement('canvas');
+    return !!(window.WebGLRenderingContext &&
+              (probe.getContext('webgl2') || probe.getContext('webgl')));
+  } catch (e) { return false; }
+}
+if (!hasWebGL()) {
+  window.__viewerFail(
+    'Tarayıcınız 3D görüntülemeyi (WebGL) desteklemiyor ya da kapalı.',
+    'Güncel bir tarayıcıda açmayı veya donanım hızlandırmayı açmayı deneyin.');
+  throw new Error('WebGL yok');
+}
+
+const renderer = new THREE.WebGLRenderer({
+  canvas, antialias: true, alpha: true,
+  // preserveDrawingBuffer zayıf GPU'larda pahalı; görüntü alma anında
+  // zaten elle render ediliyor, sürekli tamponu saklamaya gerek yok.
+  preserveDrawingBuffer: false,
+  powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0d11);
+const camera = new THREE.PerspectiveCamera(34, 1, 0.01, 200);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.075;
+controls.rotateSpeed = 0.85;
+controls.minDistance = 0.05;
+controls.autoRotateSpeed = 1.1;
+
+/* Üç nokta stüdyo aydınlatması. HDRI yansımayı verir, bu ışıklar formu ve
+   gölgeyi verir; yalnız HDRI ile parçaların kenarları kayboluyor. */
+const key = new THREE.DirectionalLight(0xffffff, 2.1);
+key.position.set(2.4, 3.4, 2.2);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.bias = -0.0012;
+key.shadow.normalBias = 0.012;
+const fillLight = new THREE.DirectionalLight(0x9fc4e8, 0.55);
+fillLight.position.set(-3, 1.2, 1.4);
+const rim = new THREE.DirectionalLight(0xdce8ff, 0.9);
+rim.position.set(-1.6, 1.4, -2.8);
+const ambient = new THREE.AmbientLight(0xffffff, 0.12);
+scene.add(key, fillLight, rim, ambient);
+
+/* Zemin artık GÖRÜNÜR bir yüzey, yalnız gölge tutucu değil.
+
+   Önceki sürümde `ShadowMaterial` kullanılıyordu: gölge düşüyor ama zemin
+   görünmüyordu, yani ürün boşlukta süzülüyordu. Fonu değiştirmek tek başına
+   bunu çözmedi — ürün hafif yukarıdan çekildiği için arkada kalan şey
+   zemindir ve zemin yoksa kadraj yine "hiçbir yer"dir.
+
+   Beton koyu ve MAT: parlak bir zemin vananın altına ikinci bir kopyasını
+   yansıtır ve dikkati böler. Gölgeyi de bu yüzey alıyor. */
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.88,
+                                   metalness: 0.0 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+/* --------------------------------------------------------- projeksiyon durumu */
+/* Varsayılan karışım 1.0 DEĞİL: model fotoğraftan ölçülmediği için hizalama
+   kusursuz olamaz (bkz. cad/… core/projection.py). Fotoğraf baskın, ama altta
+   duran PBR metali tamamen örtmüyor; kenarlarda ve hizanın kaydığı yerlerde
+   ikisi karışınca sonuç tek başına fotoğraftan da tek başına CG'den de
+   gerçekçi görünüyor. Kullanıcı şeritten istediği değere çekebilir. */
+const PHOTO_MIX_DEFAULT = 0.85;
+const projection = { enabled: false, uniforms: null, camera: null, iou: 0 };
+
+function setPhotoMix(value) {
+  /* Uniform NESNELERİ bütün malzemelere referansla dağıtıldığı için tek bir
+     yerden değer vermek hepsini birden günceller.
+
+     Endüstriyel "fallback" kayması fotoğraf karışımına BAĞLI: fotoğraf
+     kapatılınca modelin tamamı yine parlak stüdyo PBR'sine döner. Bağlı
+     olmasaydı, fotoğrafsız modda bütün yüzeyler (hiçbiri projeksiyon
+     görmediği için) koyu metale kayar ve sayfa kararırdı. */
+  if (projection.uniforms) {
+    projection.uniforms.uProjMix.value = value;
+    projection.uniforms.uFallbackMix.value = value;
+  }
+  state.photoMix = value;
+  const btn = document.getElementById('t-photo');
+  if (btn) btn.classList.toggle('on', value > 0.01);
+}
+
+/* ------------------------------------------------------------------ durum */
+const state = { exploded: 0, xray: false, labels: false, spin: false,
+                selected: null, diag: 1, parts: new Map(), nodes: [],
+                edges: [], radius: 1, root: null,
+                pipeline: null, diorama: null, pipeAxis: null, pipeOuter: 0,
+                pipeHome: null, pipeCenter: null, labelsManual: false,
+                pullDir: null, homeRoot: null,
+                home: new THREE.Vector3() };
+const PART = new Map(DATA.parts.map(p => [p.id, p]));
+const EASE = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const STAGE_DELAY = 0.085;
+
+/* ------------------------------------------------------------------ yükleme
+   Dört aşama, tek ilerleme çubuğu. Sahne ancak DÖRDÜ DE bittiğinde açılır:
+   yarım yüklenmiş bir sahneyi göstermek, modelin kara bir siluet olarak
+   belirip sonra malzemelerin "patlamasına" yol açıyor.
+
+   Yüzde gerçek bayttan hesaplanıyor. Dosya boyutları paketleme sırasında
+   biliniyor ve sayfaya gömülüyor; buna gerek var çünkü tünel (cloudflared)
+   yanıtları parçalı (chunked) gönderiyor ve `Content-Length` olmadığı için
+   tarayıcının bildirdiği `total` sıfır geliyor — eski sayfada yüzde bu yüzden
+   hiç ilerlemiyordu. */
+const loaderEl = document.getElementById('loader');
+const lpct = document.getElementById('lpct');
+const lphase = document.getElementById('lphase');
+const fill = document.getElementById('fill');
+
+const WEIGHT = { model: 0.78, hdri: 0.22 };
+const bytes = { model: DATA.model_bytes || 0, hdri: DATA.hdri_bytes || 0 };
+const got = { model: 0, hdri: 0 };
+
+function setPhase(text) { lphase.textContent = text; }
+
+function tick(which, loaded, total) {
+  got[which] = total ? loaded / total : (bytes[which] ? loaded / bytes[which] : 0);
+  const known = bytes.model > 0;
+  if (!known) return;                      // boyut bilinmiyorsa belirsiz çubuk
+  loaderEl.classList.remove('indeterminate');
+  let pct = 0, sum = 0;
+  for (const k of Object.keys(WEIGHT)) {
+    if (k === 'hdri' && !DATA.hdri) continue;
+    sum += WEIGHT[k];
+    pct += Math.min(1, got[k]) * WEIGHT[k];
+  }
+  const value = Math.min(99, Math.round(pct / (sum || 1) * 100));
+  fill.style.width = value + '%';
+  lpct.textContent = value + '%';
+}
+
+function loadModel() {
+  return new Promise((resolve, reject) => {
+    const loader = new GLTFLoader();
+    const ready = DATA.draco
+      // Draco çözücüsü YALNIZCA model sıkıştırılmışsa indirilir. Küçük bir
+      // modelde ~350 KB'lık çözücüyü indirmek net kayıp olurdu; bu yüzden
+      // sıkıştırma eşiği aşılmadıkça bu dal hiç çalışmaz.
+      ? import('three/addons/loaders/DRACOLoader.js').then(m => {
+          loader.setDRACOLoader(new m.DRACOLoader()
+            .setDecoderPath(DATA.draco_path)
+            .setDecoderConfig({ type: 'wasm' }));
+        })
+      : Promise.resolve();
+    ready.then(() => loader.load(DATA.model, resolve,
+                                 ev => tick('model', ev.loaded, ev.total), reject))
+         .catch(reject);
+  });
+}
+
+/* Arka plan GÖRSELİ yok. Bağlamı artık fiziksel diorama veriyor
+   (bkz. buildDiorama): boruların delip geçtiği kahverengi şase. Bulanık bir
+   fon ne gölge alır ne verir, ne de ürünle aynı perspektifte durur; göz onu
+   "arkada bir resim var" diye okur. Sahnenin fonu bu yüzden yalnız koyu bir
+   renk; görünen her şey gerçekten orada duran bir yüzeydir. */
+function loadEnvironment() {
+  if (!DATA.hdri) return Promise.resolve(null);
+  return new Promise(resolve => {
+    new HDRLoader().load(DATA.hdri, tex => {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const env = pmrem.fromEquirectangular(tex).texture;
+      tex.dispose(); pmrem.dispose();
+      resolve(env);
+    }, ev => tick('hdri', ev.loaded, ev.total),
+       () => resolve(null));            // HDRI olmazsa ışıklar yeterli
+  });
+}
+
+async function boot() {
+  setPhase('{{ ui.downloading }}');
+  const [gltf, env] = await Promise.all([loadModel(), loadEnvironment()]);
+  if (env) {
+    scene.environment = env;
+    /* Stüdyo artık KOYU bir ortam + birkaç küçük ve çok parlak dikdörtgen
+       softbox. Metalik bir yüzey ne görürse odur: koyu çevre koyu gövdeyi,
+       softbox'lar keskin parlaklık şeritlerini verir. O yüzden ortam tam
+       güçte çalışır — kısmak kontrastı öldürür ve gri boyaya geri döner. */
+    scene.environmentIntensity = 1.0;
+
+
+    /* Yönlü ışıklar artık aydınlatmıyor; neredeyse yalnızca ZEMİN GÖLGESİ
+       için duruyorlar. Metalde yönlü ışık yalnız küçük bir speküler leke
+       bırakır, rengi ortam belirler — ışığı yükseltmek metali boyamaktır. */
+    key.intensity = 0.55;
+    fillLight.intensity = 0.10;
+    rim.intensity = 0.25;
+    ambient.intensity = 0.0;
+    renderer.toneMappingExposure = 1.0;
+  }
+
+  setPhase('{{ ui.preparing }}');
+  fill.style.width = '100%';
+  lpct.textContent = '100%';
+  buildScene(gltf);
+
+  // Gölgeler ve malzemeler derlenmeden sahneyi açmak ilk karede takılmaya
+  // yol açıyor; derlemeyi bekleyip öyle gösteriyoruz.
+  if (renderer.compileAsync) {
+    await renderer.compileAsync(scene, camera);
+  } else {
+    renderer.compile(scene, camera);
+  }
+  renderer.render(scene, camera);
+  await new Promise(r => requestAnimationFrame(r));
+  reveal();
+}
+
+function reveal() {
+  canvas.classList.add('ready');
+  loaderEl.classList.add('gone');
+  setTimeout(() => loaderEl.remove(), 700);
+  setTimeout(() => { const h = document.getElementById('hint');
+                     if (h) h.style.opacity = 0; }, 6500);
+  // Modelin yumuşak girişi: hafifçe büyüyerek yerine otursun.
+  const root = state.root;
+  if (!root) return;
+  const target = root.scale.x;
+  const t0 = performance.now();
+  (function grow(now) {
+    const k = Math.min(1, (now - t0) / 650);
+    root.scale.setScalar(target * (0.955 + 0.045 * EASE(k)));
+    if (k < 1) requestAnimationFrame(grow);
+    else root.scale.setScalar(target);
+  })(t0);
+}
+
+/* ---------------------------------------------------------- mikro yüzey
+   Gerçek döküm/işlenmiş çelikte pürüzlülük yüzey boyunca DEĞİŞİR; tek bir
+   sabit değer parlaklığı her yerde aynı yapar ve göz bunu plastik olarak
+   okur. CAD geometrisinde UV yok, dolayısıyla doku haritası uygulanamıyor:
+   pürüzlülük, nesne uzayındaki konumdan prosedürel gürültüyle üretiliyor
+   (triplanar'a gerek kalmadan doğrudan 3B gürültü). Ek dosya inmez,
+   UV gerekmez, parça patlarken doku parçayla birlikte gider.
+
+   Modül düzeyinde duruyor çünkü hem modelin malzemeleri hem boru hattı ve
+   diorama yüzeyleri aynı gürültüyü kullanıyor. */
+const MICRO_NOISE = `
+  float h31(vec3 p){
+    p = fract(p * 0.3183099 + vec3(0.11, 0.17, 0.13));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float vnoise(vec3 x){
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(h31(i + vec3(0,0,0)), h31(i + vec3(1,0,0)), f.x),
+                   mix(h31(i + vec3(0,1,0)), h31(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(h31(i + vec3(0,0,1)), h31(i + vec3(1,0,1)), f.x),
+                   mix(h31(i + vec3(0,1,1)), h31(i + vec3(1,1,1)), f.x), f.y), f.z);
+  }
+  float fbm3(vec3 p){
+    return 0.5 * vnoise(p) + 0.3 * vnoise(p * 2.07) + 0.2 * vnoise(p * 4.13);
+  }`;
+
+function buildScene(gltf) {
+  const root = gltf.scene;
+  state.root = root;
+  scene.add(root);
+
+  /* ------------------------------------------------- fotoğraf projeksiyonu
+     Müşterinin kendi fotoğrafı modelin dış kabuğuna, SABİT bir projektör
+     matrisinden yansıtılıyor — kameradan değil. Kamera döndüğünde matris
+     değişmediği için doku yüzeye yapışık kalır; parça patladığında da düğümün
+     DURAĞAN (rest) dünya matrisi kullanıldığı için doku parçayla gider.
+
+     UV'ye pişirmek yerine shader'ı seçmemizin sebebi: parçalar örneklenmiş
+     (4 cıvata tek mesh'i paylaşıyor). Mesh'e UV yazmak örneklemeyi bozar,
+     dosyayı büyütür ve Draco/GLB sözleşmesini değiştirirdi.
+
+     Fotoğraf yalnız ÖN yüzü gördüğü için üç kapı var (bkz. `w` hesabı):
+       1. kadraj   — projeksiyon karesinin dışı, kenarda yumuşayarak biter
+       2. yönelim  — projektöre sırtını dönen yüzeyler devre dışı
+       3. görünürlük — projektörden render edilen derinlik haritasıyla gölge
+                       testi; arkada kalan yüzeylere fotoğraf sızmaz
+     Üçünden biri kapanınca piksel mevcut endüstriyel PBR metaline düşer. */
+  /* Kaç projektör var: fotoğraf başına bir tane, en çok MULTI_COUNT.
+     Shader bu sayıya göre AÇILARAK üretiliyor — GLSL ES 1.0'da sampler
+     dizisini değişkenle indekslemek yasak, döngüyü elle açmak hem güvenli
+     hem de tek bir uniform bile boşa gitmiyor. */
+  const PROJECTORS = (DATA.projectors && DATA.projectors.length)
+    ? DATA.projectors : (DATA.projection ? [DATA.projection] : []);
+
+  function projUniformNames(i) {
+    return { photo: 'uPhoto' + i, depth: 'uProjDepth' + i, mask: 'uProjMask' + i,
+             hasMask: 'uProjHasMask' + i, vp: 'uProjVP' + i,
+             fitM: 'uFitMatrix' + i, fitO: 'uFitOffset' + i, pos: 'uProjPos' + i };
+  }
+
+  /* Her projektör için aynı dört kapı (bkz. tek yönlü sürümün açıklaması):
+       1. kadraj  2. yönelim  3. derinlik  4. ürün maskesi
+     Yeni olan: ağırlıklar TOPLANIYOR. Bir yüzey birden çok fotoğrafta
+     görünüyorsa renkleri ağırlıklı ortalanır; hiçbirinde görünmüyorsa
+     toplam sıfır kalır ve piksel endüstriyel PBR'ye düşer. */
+  const PROJ_GLSL = PROJECTORS.map((p, i) => {
+    const n = projUniformNames(i);
+    return `
+    uniform sampler2D ${n.photo};
+    uniform sampler2D ${n.depth};
+    uniform sampler2D ${n.mask};
+    uniform float ${n.hasMask};
+    uniform mat4 ${n.vp};
+    uniform mat2 ${n.fitM};
+    uniform vec2 ${n.fitO};
+    uniform vec3 ${n.pos};`;
+  }).join('\n') + `
+    uniform float uProjMix;
+    uniform float uProjExposure;
+    uniform float uProjBias;
+    uniform float uProjPart;
+    uniform vec3 uFallbackTint;
+    uniform float uFallbackRough;
+    uniform float uFallbackMix;
+    uniform float uAOStrength;
+    uniform float uAOTint;
+    varying vec3 vRestPos;
+    varying vec3 vRestNormal;
+    varying float vAO;
+    float gProjW = 0.0;
+    vec3 gProjRGB = vec3(0.0);
+    float projUnpackDepth(vec4 v){
+      return dot(v, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0));
+    }`;
+
+  function projSampleCode() {
+    const body = PROJECTORS.map((p, i) => {
+      const n = projUniformNames(i);
+      return `
+      {
+        vec4 pc = ${n.vp} * vec4(vRestPos, 1.0);
+        if (pc.w > 0.0) {
+          vec3 ndc = pc.xyz / pc.w;
+          vec2 base = ndc.xy * 0.5 + 0.5;
+          vec2 uv = ${n.fitM} * base + ${n.fitO};
+          vec2 edge = min(uv, 1.0 - uv);
+          float frame = smoothstep(0.0, 0.035, min(edge.x, edge.y));
+          vec3 toProj = normalize(${n.pos} - vRestPos);
+          float facing = smoothstep(0.30, 0.65, dot(normalize(vRestNormal), toProj));
+          float here = ndc.z * 0.5 + 0.5;
+          float stored = projUnpackDepth(texture2D(${n.depth}, base));
+          float visible = step(here - uProjBias, stored);
+          float inObject = mix(1.0, texture2D(${n.mask}, uv).r, ${n.hasMask});
+          /* Ağırlık yönelimin KARESİYLE artar: aynı yüzeyi iki fotoğraf
+             görüyorsa, ona daha dik bakan kare baskın olsun. Doğrusal
+             ağırlıkta iki kare eşit karışıyor ve ikisi de bulanıklaşıyordu. */
+          float w = frame * facing * facing * visible * inObject;
+          if (w > 0.0005) {
+            total += w;
+            accum += w * texture2D(${n.photo}, uv).rgb;
+          }
+        }
+      }`;
+    }).join('');
+    return `
+    if (uProjMix > 0.001 && uProjPart > 0.5) {
+      float total = 0.0;
+      vec3 accum = vec3(0.0);
+      ${body}
+      if (total > 0.0005) {
+        gProjRGB = accum / total * uProjExposure;
+        gProjW = min(total, 1.0) * uProjMix;
+      }
+    }`;
+  }
+
+  /* Fotoğrafın GÖRMEDİĞİ yüzeyler: arka yüz, iç mekanizma, patlatınca ortaya
+     çıkan vidalar ve contalar. Oraya fotoğraf koyamayız; ama parlak stüdyo
+     PBR'si de yanlış, çünkü fotoğrafın yanında plastik gibi parlıyor ve
+     "modelin yarısı render, yarısı fotoğraf" izlenimini veriyor.
+
+     Çözüm: görünmeyen yüzeyler koyu ve pürüzlü endüstriyel çeliğe kayar —
+     montaj hattından yeni çıkmış, parlatılmamış döküm/işlenmiş yüzey. Kayma
+     fotoğraf ağırlığının TERSİYLE orantılı olduğu için geçiş görünmez; aynı
+     parça üstte fotoğraf, altta endüstriyel metal olur.
+
+     Yalıtkanlar (conta, PTFE oturma) daha az karartılır: zaten koyu olan
+     NBR contayı 0.55 ile çarpmak onu simsiyah bir lekeye çeviriyordu.
+     Pürüzlülük SABİT bir değere çekilmiyor, ÜZERİNE ekleniyor. Parlatılmış
+     küreyi 0.64'e çekmek onu mat bir taşa çeviriyordu; oysa o parça gerçekten
+     ayna gibi parlatılmıştır, yalnızca fotoğrafta görünmüyor. Eklemeli kayma
+     her malzemenin karakterini korur: döküm gövde daha da matlaşır, parlatılmış
+     yüzey biraz saten olur. */
+  const FALLBACK_TINT = [0.54, 0.55, 0.585];   // koyu çelik (sRGB çarpanı)
+  const FALLBACK_ROUGH = 0.18;                 // pürüzlülük ARTIŞI (mutlak değil)
+  const FALLBACK_DIELECTRIC = 0.82;            // yalıtkanlar için yumuşak kayma
+
+  /* Pişirilmiş AO (bkz. cad/ao.py). Dolaylı ışık ve ortam yansıması bu değerle
+     çarpılır — doğrudan ışık değil: AO ortam gölgelemesidir, gölge değil.
+     `uAOTint` ayrıca taban rengi hafifçe karartır; metalde taban renk F0
+     olduğu için kararma yansımada da okunur, asıl girinti etkisini o verir. */
+  const AO_STRENGTH = 1.0;
+  /* Taban rengi kararmasi 0,70'ten 0,90'a cikarildi. Metalde taban renk
+     F0'dir, yani kararma YANSIMADA da okunur — girinti etkisini asil veren
+     budur. Dusuk degerde dipler yalniz "biraz gri" oluyor, parca isikla
+     bulustugunda hacim kazanmiyordu. */
+  const AO_TINT = 0.90;
+
+  function prepareMaterial(mat, mesh) {
+    if (!mat || mat.userData.prepared) return;
+    mat.userData.prepared = true;
+    /* Genlik pürüzlülüğün KARESİYLE gider. Sebebi fiziksel: bir yüzey
+       pürüzlüyse düzensiz olduğu için pürüzlüdür (döküm, kumlama), parlatılmış
+       yüzey ise tanımı gereği DÜZGÜN parlatılmıştır. Doğrusal bir bağıntı
+       küre gibi aynasal parçalarda görünür koyu lekeler bırakıyordu. */
+    /* İnce bandın genliği DÜŞÜK tutulur. Deseni 260 frekansta (~4 mm)
+       kuvvetlendirmek yakın planda piksel ölçeğinde titreme yaratıyor ve
+       döküm çelik değil ZIMPARA gibi duruyordu (ölçüldü: 0,30 genlikte
+       gövde tuz-biber). Yüzeyin karakterini iri bant taşır; ince bant
+       yalnız onu kırar. */
+    const amp = Math.min(0.15, 0.52 * mat.roughness * mat.roughness);
+    const freq = 260.0;                     // model metre cinsinden: ~4 mm desen
+    /* UC BANT. Tek bir ince tane bandi yuzeyi "temiz ve tek tip" birakiyordu:
+       desen gozun secemeyecegi kadar kucuk, urun de plastik gibi duruyordu.
+
+         broad   — dokum yuzeyin iri lekesi (~2,5 cm). Puruzlulukle artar:
+                   kum dokum govde dalgali, islenmis altigen uc duz.
+         scratch — taslama/tornadan kalan YONLU cizikler. Puruzlulukle TERS
+                   orantili: cizik ancak parlak yuzeyde gorunur; mat dokum
+                   zaten cizik gibi durur, ustune eklemek camur yapar. */
+    const broadAmp = Math.min(0.22, 0.62 * mat.roughness);
+    const scratchAmp = 0.085 * Math.max(0.0, 1.0 - mat.roughness * 1.6);
+    // Düğümün patlamadan ÖNCEKİ dünya matrisi: projeksiyonun çapası budur.
+    const rest = mesh.matrixWorld.clone();
+    const restNormal = new THREE.Matrix3().getNormalMatrix(rest);
+    // AO niteliği olmayan geometri (yerel kütüphane modeli, eski paket) için
+    // sabit 1.0 derlenir — tanımsız attribute okumak yüzeyi simsiyah yapardı.
+    const hasAO = !!mesh.geometry.getAttribute('ao');
+    /* Aktüatör fotoğraflarda YOK: müşterinin 8 karesi çıplak milli vanayı
+       gösteriyor. Projeksiyon oraya da vurunca aktüatörün üstüne vananın
+       gövdesinden kopan "1000 WOG" lekeleri düşüyordu. Fotoğrafın içermediği
+       ürüne fotoğraf giydirmek uydurmadır; o parçalar kendi PBR renkleriyle
+       (anotlu alüminyum, mavi kapak, sarı gösterge) kalır. */
+    const projected = (mesh.userData.grp !== 'actuator') ? 1 : 0;
+
+    mat.onBeforeCompile = shader => {
+      shader.uniforms.uMicroAmp = { value: amp };
+      shader.uniforms.uMicroFreq = { value: freq };
+      shader.uniforms.uBroadAmp = { value: broadAmp };
+      shader.uniforms.uScratchAmp = { value: scratchAmp };
+      shader.vertexShader = 'varying vec3 vMicroPos;\nvarying vec3 vRestPos;\n' +
+        'varying vec3 vRestNormal;\nvarying float vAO;\nuniform mat4 uRestMatrix;\n' +
+        'uniform mat3 uRestNormalMatrix;\n' + (hasAO ? 'attribute float ao;\n' : '') +
+        shader.vertexShader
+        .replace('#include <begin_vertex>',
+                 '#include <begin_vertex>\n' +
+                 '  vMicroPos = transformed;\n' +
+                 '  vRestPos = (uRestMatrix * vec4(transformed, 1.0)).xyz;\n' +
+                 '  vRestNormal = uRestNormalMatrix * objectNormal;\n' +
+                 '  vAO = ' + (hasAO ? 'ao' : '1.0') + ';');
+
+      shader.fragmentShader = 'varying vec3 vMicroPos;\nuniform float uMicroAmp;\n' +
+        'uniform float uMicroFreq;\nuniform float uBroadAmp;\n' +
+        'uniform float uScratchAmp;\n' + MICRO_NOISE + '\n' + PROJ_GLSL + '\n' +
+        shader.fragmentShader
+        /* Projeksiyon ağırlığı ışıklandırmadan ÖNCE hesaplanıyor: hem taban
+           rengi hem pürüzlülük ona göre kayıyor. */
+        .replace('#include <color_fragment>',
+                 projSampleCode() + '\n' +
+                 '  float gFallback = (1.0 - gProjW) * uFallbackMix;\n' +
+                 '#include <color_fragment>\n' +
+                 '  vec3 gTint = mix(vec3(' + FALLBACK_DIELECTRIC.toFixed(3) +
+                 '), uFallbackTint, metalness);\n' +
+                 /* Karartma PÜRÜZLÜLÜKLE orantılı. "Endüstriyel" görünüm
+                    yüzeyin MAT olmasından gelir, koyu olmasından değil;
+                    parlatılmış küreyi 0.54 ile çarpmak onu kapkara bir
+                    lekeye çeviriyordu — patlatılmış görünümde top ekranda
+                    duruyor ama görünmüyordu (ölçüldü). */
+                 '  gTint = mix(vec3(1.0), gTint, clamp(roughness * 1.7, 0.0, 1.0));\n' +
+                 '  diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * gTint, gFallback);\n' +
+                 '  diffuseColor.rgb *= mix(1.0, vAO, uAOTint);')
+        .replace('#include <roughnessmap_fragment>',
+                 '#include <roughnessmap_fragment>\n' +
+                 '  float mGrain = fbm3(vMicroPos * uMicroFreq) - 0.5;\n' +
+                 '  float mBroad = fbm3(vMicroPos * uMicroFreq * 0.17) - 0.5;\n' +
+                 /* Cizikler bir eksende EZILMIS gurultudur: y yonunde 25 kat seyrek
+                    orneklenince desen ince uzun seritlere donusur. */
+                 '  float mScratch = vnoise(vec3(vMicroPos.x * uMicroFreq * 7.0,' +
+                 ' vMicroPos.y * uMicroFreq * 0.28,' +
+                 ' vMicroPos.z * uMicroFreq * 7.0)) - 0.5;\n' +
+                 '  roughnessFactor = clamp(roughnessFactor' +
+                 ' + mGrain * uMicroAmp + mBroad * uBroadAmp' +
+                 ' + mScratch * uScratchAmp, 0.03, 1.0);\n' +
+                 '  roughnessFactor = mix(roughnessFactor, ' +
+                 'clamp(roughnessFactor + uFallbackRough, 0.03, 1.0), gFallback);')
+        /* three.js'in kendi AO bloğu `aoMap` dokusu ister; bizim AO'muz köşede
+           duruyor. Blok birebir aynı işi yapacak şekilde değiştiriliyor —
+           dolaylı yayınım ve (en önemlisi) ortam yansıması kararır. */
+        .replace('#include <aomap_fragment>',
+                 '  float ambientOcclusion = mix(1.0, vAO, uAOStrength);\n' +
+                 '  reflectedLight.indirectDiffuse *= ambientOcclusion;\n' +
+                 '  #if defined( USE_ENVMAP ) && defined( STANDARD )\n' +
+                 '    float dotNVao = saturate( dot( geometryNormal, geometryViewDir ) );\n' +
+                 '    reflectedLight.indirectSpecular *= computeSpecularOcclusion' +
+                 '( dotNVao, ambientOcclusion, material.roughness );\n' +
+                 '  #endif');
+
+      shader.uniforms.uRestMatrix = { value: rest };
+      shader.uniforms.uRestNormalMatrix = { value: restNormal };
+      Object.assign(shader.uniforms, projection.uniforms);
+      // Parça kapısı malzemeye ÖZEL; paylaşılan uniform nesnesi olamaz.
+      shader.uniforms.uProjPart = { value: projected };
+      /* Fotoğraf ton eşlemesinden SONRA karışıyor: içinde zaten gerçek ışık
+         pişmiş durumda, ikinci kez ACES'ten geçirmek onu soldurur.
+
+         AO fotoğrafa KISITLI uygulanır (×0.35): fotoğrafta ürünün kendi
+         girinti kararmaları zaten pişmiş durumda, üstüne tam AO eklemek aynı
+         gölgeyi ikinci kez boyar. Tamamen kaldırmak da doğru değil — modelde
+         olup fotoğrafın çözemediği ince girintiler (diş kökü, cıvata yuvası)
+         o zaman düz kalıyor. */
+      const marker = shader.fragmentShader.includes('#include <tonemapping_fragment>')
+        ? '#include <tonemapping_fragment>' : '#include <colorspace_fragment>';
+      shader.fragmentShader = shader.fragmentShader
+        .replace(marker, marker + '\n' +
+                 '    if (gProjW > 0.001) {\n' +
+                 '      gl_FragColor.rgb = mix(gl_FragColor.rgb, gProjRGB * ' +
+                 'mix(1.0, vAO, uAOTint * 0.35), gProjW);\n' +
+                 '    }');
+      mat.userData.shader = shader;
+    };
+    mat.needsUpdate = true;
+  }
+
+  /* Pişirilmiş AO, GLB'de standart `COLOR_0` olarak geliyor (doğrulayıcıdan
+     geçsin ve Draco sıkıştırsın diye). GLTFLoader onu köşe rengi sanıp taban
+     renge çarpıyor; biz ise şiddetini ayarlayabilmek ve ortam yansımasına da
+     uygulayabilmek istiyoruz. Bu yüzden kırmızı kanal tek bileşenli `ao`
+     niteliğine taşınıp köşe rengi kapatılıyor. */
+  function adoptAO(geometry) {
+    const color = geometry.getAttribute('color');
+    if (!color || geometry.getAttribute('ao')) return !!geometry.getAttribute('ao');
+    const count = color.count;
+    const values = new Float32Array(count);
+    for (let i = 0; i < count; i++) values[i] = color.getX(i);
+    geometry.setAttribute('ao', new THREE.BufferAttribute(values, 1));
+    geometry.deleteAttribute('color');
+    return true;
+  }
+
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+    obj.castShadow = true;
+    obj.receiveShadow = true;
+    adoptAO(obj.geometry);
+    /* Malzeme klonlanmazsa aynı malzemeyi paylaşan parçalar X-Ray'de
+       birlikte saydamlaşır (gövde saydamken kapak da saydam olur). */
+    obj.material = obj.material.clone();
+    obj.material.vertexColors = false;      // AO artık `ao` niteliğinde
+    obj.userData.baseOpacity = 1;
+    obj.userData.emissive = obj.material.emissive ? obj.material.emissive.clone()
+                                                  : new THREE.Color(0, 0, 0);
+    // hazırlık klondan SONRA: her klon kendi shader'ını derler (aşağıda,
+    // durağan matrisler kesinleştikten sonra toplu yapılıyor)
+  });
+
+  /* Dış erişim kancası: sayfa bir ES modülü olduğu için sahneye dışarıdan
+     ulaşılamıyor. Aydınlatma/malzeme ayarlarının gerçek tarayıcıda ölçülüp
+     doğrulanabilmesi (ve destek sırasında hızlı teşhis) için açıkta tutuluyor. */
+  window.__viewer = { THREE, scene, renderer, camera, controls, root,
+                      lights: { key, fill: fillLight, rim, ambient },
+                      projection, setPhotoMix, setExplode,
+                      /* Oda kutusu ve kelepçe dışarı açık: "disarisi
+                         gorunuyor mu" denetimi (tools/node/void_check.mjs)
+                         kamerayı sayfanın KENDİ kuralıyla gezdirmeli,
+                         yoksa duvarın arkasına geçip olmayan bir kaçak
+                         bulur. */
+                      get room() { return state.room; },
+                      confine: confineCamera,
+                      render: () => renderer.render(scene, camera) };
+
+  /* Projeksiyon kurulumu. Sıra önemli: durağan dünya matrisleri kesinleşmeden
+     projektör kurulamaz, projektör kurulmadan da malzemeler derlenemez. */
+  function setupProjection() {
+    const uniforms = {
+      uProjMix: { value: 0 }, uProjExposure: { value: 1 },
+      uProjBias: { value: 0.0012 },
+      uFallbackTint: { value: new THREE.Color(...FALLBACK_TINT) },
+      uFallbackRough: { value: FALLBACK_ROUGH },
+      uFallbackMix: { value: 0 },
+      uAOStrength: { value: AO_STRENGTH },
+      uAOTint: { value: AO_TINT },
+    };
+    projection.uniforms = uniforms;
+    if (!PROJECTORS.length) return null;       // projeksiyon verisi yoksa saf PBR
+
+    root.updateMatrixWorld(true);
+
+    /* Derinlik haritaları TEK geçişte alınır: sahne her projektör için bir
+       kez derinlik malzemesiyle render edilir. Zemin düzlemi dışarıda
+       bırakılmalı — bu aşamada model henüz zemine oturtulmamış (ortalanmış)
+       durumda, y=0 düzlemi gövdenin tam ortasından geçiyor ve kameraya
+       yakın koca bir yüzey yazıyor; modelin alt yarısı "arkada kaldı"
+       sayılıp fotoğrafı hiç almıyordu. */
+    const depthMat = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking });
+    const prevTarget = renderer.getRenderTarget();
+    const prevClear = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    ground.visible = false;
+    scene.overrideMaterial = depthMat;
+
+    const loader = new THREE.TextureLoader();
+    const cameras = [];
+    PROJECTORS.forEach((P, i) => {
+      const n = projUniformNames(i);
+      const cam = new THREE.PerspectiveCamera(P.fov, P.aspect, P.near, P.far);
+      cam.position.fromArray(P.position);
+      cam.up.set(0, 1, 0);
+      cam.lookAt(new THREE.Vector3().fromArray(P.target));
+      cam.updateMatrixWorld(true);
+      cam.updateProjectionMatrix();
+      cameras.push(cam);
+
+      uniforms[n.vp] = { value: new THREE.Matrix4().multiplyMatrices(
+        cam.projectionMatrix, cam.matrixWorldInverse) };
+      uniforms[n.pos] = { value: cam.position.clone() };
+      uniforms[n.fitO] = { value: new THREE.Vector2(
+        P.fit_offset[0], P.fit_offset[1]) };
+      /* GLSL mat2 SÜTUN sıralıdır; Python satır sıralı veriyor, bu yüzden
+         elemanlar çapraz yerleştiriliyor. */
+      const f = P.fit_matrix;
+      uniforms[n.fitM] = { value: new Float32Array([f[0], f[2], f[1], f[3]]) };
+
+      const photo = loader.load(P.photo, tex => {
+        tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true; });
+      photo.colorSpace = THREE.SRGBColorSpace;
+      photo.wrapS = photo.wrapT = THREE.ClampToEdgeWrapping;
+      uniforms[n.photo] = { value: photo };
+
+      uniforms[n.hasMask] = { value: 0 };
+      if (P.mask) {
+        /* Maske inmezse (eksik dosya, 404) kapı HER pikseli kapatır ve
+           fotoğraf modelde hiç görünmez — sessiz ve teşhisi zor bir
+           bozulma. Hata durumunda o projektörün maske kapısı devre dışı
+           bırakılıyor: fotoğraf yine yansır, yalnız kenarda arka plan
+           sızabilir. */
+        const maskTex = loader.load(P.mask, undefined, undefined, () => {
+          uniforms[n.hasMask].value = 0;
+          console.warn('projeksiyon maskesi yüklenemedi: ' + P.mask); });
+        maskTex.wrapS = maskTex.wrapT = THREE.ClampToEdgeWrapping;
+        uniforms[n.mask] = { value: maskTex };
+        uniforms[n.hasMask].value = 1;
+      } else {
+        uniforms[n.mask] = { value: photo };   // kullanılmaz, bağlama için
+      }
+
+      const rt = new THREE.WebGLRenderTarget(1024, 1024, {
+        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+        format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+        depthBuffer: true });
+      renderer.setRenderTarget(rt);
+      renderer.setClearColor(0xffffff, 1);     // boşluk = en uzak
+      renderer.clear();
+      renderer.render(scene, cam);
+      uniforms[n.depth] = { value: rt.texture };
+    });
+
+    scene.overrideMaterial = null;
+    ground.visible = true;
+    renderer.setRenderTarget(prevTarget);
+    renderer.setClearColor(prevClear, prevAlpha);
+
+    projection.camera = cameras[0];
+    projection.cameras = cameras;
+    projection.enabled = true;
+    projection.iou = PROJECTORS[0].iou || 0;
+    projection.count = PROJECTORS.length;
+    return cameras[0];
+  }
+
+  setupProjection();
+  root.traverse(obj => { if (obj.isMesh) prepareMaterial(obj.material, obj); });
+  const photoBtn = document.getElementById('t-photo');
+  if (photoBtn) {
+    photoBtn.hidden = !projection.enabled;
+    /* Rakamı gizlemiyoruz. Fotoğraf yüzeyin bir kısmını giydirir (ölçülen
+       değer), kalanı PBR'dir; müşteri neye baktığını bilmeli. */
+    if (projection.enabled) {
+      const worn = Math.round((DATA.projection.coverage || 0) * 100);
+      photoBtn.title = 'P — müşteri fotoğrafı modele yansıtılıyor' +
+        (worn ? ' (yüzeyin ~%' + worn + "'i; kalanı endüstriyel PBR çelik)" : '');
+    }
+  }
+  setPhotoMix(projection.enabled ? PHOTO_MIX_DEFAULT : 0);
+
+  /* Patlatma düğümleri: extras taşıyan her düğüm bir parça örneğidir. */
+  root.traverse(obj => {
+    const x = obj.userData || {};
+    if (!x.pid) return;
+    obj.userData.base = obj.position.clone();
+    obj.userData.dir = new THREE.Vector3(...(x.ax || [0, 1, 0]));
+    state.nodes.push(obj);
+    if (!state.parts.has(x.pid)) state.parts.set(x.pid, []);
+    state.parts.get(x.pid).push(obj);
+  });
+
+  /* Köşegen: extras'taki değere güvenmek yerine geometriden ölçülür —
+     yerel kütüphaneden gelen modellerde o alan boş olabiliyor. */
+  const local = new THREE.Box3().setFromObject(root);
+  const world = local.clone();
+  state.diag = DATA.diagonal > 0 ? DATA.diagonal
+    : new THREE.Vector3().subVectors(local.max, local.min).length() / (root.scale.x || 1);
+
+  const size = world.getSize(new THREE.Vector3());
+  const center = world.getCenter(new THREE.Vector3());
+  /* Sınır KÜRESİ yarıçapı, en büyük kenarın yarısı değil. Model eğik bir
+     açıdan bakıldığında siluetinin genişliği köşegene yaklaşıyor; en büyük
+     kenardan hesaplamak DN50 vanada %45 dar kadraj veriyor ve gövdenin altı
+     kumanda panelinin arkasında kalıyordu. */
+  state.radius = size.length() * 0.5;
+  root.position.y -= world.min.y;        // zemine otursun
+  center.y -= world.min.y;
+  /* Ölçüm zemine oturduktan SONRA: patlamış kutunun merkezi dünya
+     koordinatında saklanıyor, kök taşındıktan önce ölçülürse kamera
+     montajın eski yerine bakar. */
+  root.updateMatrixWorld(true);
+  state.spreadRatio = measureSpread(center);
+  ground.position.y = 0;
+  controls.target.copy(center);
+  state.home.copy(center);
+  state.homeRoot = root.position.clone();
+  /* Sıra zorunlu. Hat doğrusu ikisinin de girdisi; oda ölçüsü KAMERADAN
+     türer; borunun boyu ise ODADAN (uç duvarı delip geçmeli). */
+  computeFlowLine(world, center);
+  frame(1.0);
+  buildDiorama();
+  buildPipeline();
+  /* Oda kurulunca `controls.maxDistance` yazılıyor ve hat kadraja giriyor;
+     kadraj yeniden uygulanmalı ki açılış uzaklığı o sınırın içine düşsün
+     ve hattan bir parça kareye girsin. */
+  frame(1.0);
+  state.homeCam = camera.position.clone();
+
+  buildPartList();
+  buildMaterialBars();
+  buildLabels();
+}
+
+boot().catch(err => {
+  console.error(err);
+  window.__viewerFail('3D model yüklenemedi.',
+                      (err && (err.message || err.type)) || String(err));
+});
+
+/* Her parçanın tam patlamış konumu + kendi sınır küresi ile montajın
+   patlatılmış yarıçapı. Oran kameranın ne kadar geri çekileceğini verir. */
+function measureSpread(center) {
+  /* Patlatılmış montajın SINIR KÜRESİ: merkezi ve yarıçapı.
+
+     Eskiden yalnız bir "kaç kat genişledi" oranı dönüyordu ve kamera o oranla
+     geri çekiliyordu. Oran montajın nereye TAŞINDIĞINI taşımıyor: bu üründe
+     yığının tamamı yukarı açılıyor, kamera ise birleşik hâlin merkezine
+     bakmaya devam ediyordu. Sonuç, patlatmada aktüatörün ve göstergenin
+     kadrajın üstünden taşmasıydı. Merkez de ölçülünce kamera patlarken
+     hem geri çekilip hem yukarı kayabiliyor. */
+  const lo = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  let r0 = 1e-9;
+  const world = new THREE.Vector3();
+  for (const n of state.nodes) {
+    let radius = 0;
+    n.traverse(o => {
+      if (!o.isMesh) return;
+      if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      const scale = o.getWorldScale(new THREE.Vector3()).x;
+      radius = Math.max(radius, o.geometry.boundingSphere.radius * Math.abs(scale));
+    });
+    n.getWorldPosition(world);
+    r0 = Math.max(r0, world.distanceTo(center) + radius);
+    const scale = n.parent ? n.parent.getWorldScale(new THREE.Vector3()).x : 1;
+    const end = world.clone().addScaledVector(
+      n.userData.dir, (n.userData.d || 0) * state.diag * Math.abs(scale));
+    lo.set(Math.min(lo.x, end.x - radius), Math.min(lo.y, end.y - radius),
+           Math.min(lo.z, end.z - radius));
+    hi.set(Math.max(hi.x, end.x + radius), Math.max(hi.y, end.y + radius),
+           Math.max(hi.z, end.z + radius));
+  }
+  if (!isFinite(lo.x)) { lo.copy(center); hi.copy(center); }
+  /* Kök patlarken DÜZ YUKARI kalkıyor (bkz. applyExplode); kutu onunla
+     birlikte taşınmalı, yoksa ölçü montajın eski yerini gösterir. */
+  const lift = state.radius * 1.00;
+  lo.y += lift; hi.y += lift;
+  state.explodedCenter = lo.clone().add(hi).multiplyScalar(0.5);
+  state.explodedRadius = lo.distanceTo(hi) * 0.5;
+  return THREE.MathUtils.clamp(
+    (state.explodedRadius || r0) / r0, 1, 4.5);
+}
+
+function frame(zoom) {
+  /* Alt kumanda paneli tuvalin yaklaşık %12'sini örtüyor. Modeli tam
+     ortalamak alt ucunu panelin arkasında bırakıyordu; bakış noktası
+     yarıçapın %7'si kadar yukarı alınıp bir miktar geri çekiliyor. */
+  /* Boru hattı varsa biraz daha geri: kadraja hattan bir parça girmeli,
+     yoksa vana yine tek başına duruyor ve bağlam kayboluyor. */
+  /* 1,50 hatti kadraja sokuyordu ama urunu kucultuyordu: vana kahverengi
+     kutunun icinde oyuncak gibi kaliyordu. 1,12'de boru hala iki kenardan
+     giriyor, vana ise kareyi dolduruyor. */
+  const context = (state.pipeline || state.flowLine) ? 1.12 : 1.06;
+  const d = state.radius / Math.sin(THREE.MathUtils.degToRad(camera.fov * 0.5))
+            * zoom * context;
+  const look = state.home.clone();
+  look.y += state.radius * 0.07;
+  /* Açılış yönü, fotoğrafın çekildiği açıdır (projeksiyon aramasının kazananı).
+     Böylece sayfa açıldığı anda doku tam oturur; veri yoksa klasik 3/4 görünüm. */
+  const dir = (DATA.projection && DATA.projection.direction)
+    ? new THREE.Vector3().fromArray(DATA.projection.direction)
+    : new THREE.Vector3(0.78, 0.46, 1);
+  dir.normalize();
+
+  /* Açılış kamerasının YÜKSEKLİĞİ sınırlanıyor (azimut aynen korunuyor).
+
+     Projektör yönü fotoğrafın çekildiği açıdır; fotoğraflar çoğunlukla masaya
+     bakarak, 20-30° yukarıdan çekiliyor. O açıdan bakan bir kamera ufku
+     karenin DIŞINDA bırakıyor: arkada yalnız zemin kalıyor ve sayfa yine
+     "karanlık boşluk" gibi açılıyordu. Bağlam ufukta yaşıyor.
+
+     Fotoğrafın modele oturması bundan etkilenmez: doku kameraya değil, sabit
+     projektör matrisine çapalı. Açı farkı yalnız hafif bir kısalma yaratır,
+     10°'de gözle seçilmiyor. */
+  const MAX_OPEN_ELEVATION = 9;
+  const flat = Math.hypot(dir.x, dir.z) || 1e-6;
+  const elevation = THREE.MathUtils.radToDeg(Math.atan2(dir.y, flat));
+  if (elevation > MAX_OPEN_ELEVATION) {
+    const want = THREE.MathUtils.degToRad(MAX_OPEN_ELEVATION);
+    dir.set(dir.x / flat * Math.cos(want), Math.sin(want),
+            dir.z / flat * Math.cos(want)).normalize();
+  }
+  camera.position.copy(look).add(dir.clone().multiplyScalar(d));
+  camera.near = d / 120; camera.far = d * 24; camera.updateProjectionMatrix();
+  controls.target.copy(look);
+  controls.update();
+  state.baseDistance = d;
+  state.baseTarget = look.clone();
+  /* Patlatılmış hâli çerçeveleyen uzaklık ÖLÇÜLEN yarıçaptan: "oranla geri
+     çekilme" tahminiydi ve üstten taşıyordu. */
+  const sin = Math.sin(THREE.MathUtils.degToRad(camera.fov * 0.5)) || 1;
+  state.explodedDistance = (state.explodedRadius || state.radius) / sin * 1.04;
+  dolly(state.exploded);
+}
+
+/* ------------------------------------------------------- boru hattı bağlamı
+   Ürünü boşlukta göstermek ne ölçeğini ne işlevini anlatıyor. Vana, çapı
+   anma ölçüsünden gelen (EN 10220) gerçek bir hatta oturuyor: iki boru, iki
+   kaynak bileziği ve hattı taşıyan bir kelepçe.
+
+   Borular modelin ÇOCUĞU DEĞİL, sahnenin çocuğudur. Sebebi parçalanma
+   animasyonu: vana hattan ayrılıp öne gelirken borular yerinde kalmalı.
+   Çocuk olsalardı vanayla birlikte giderlerdi ve "kopma" hissi oluşmazdı. */
+/* Hattın geçtiği doğru. Boru ve oda AYNI doğruya oturur, bu yüzden ikisinden
+   de önce hesaplanır.
+
+   Eksen, eksenin geçtiği nokta ve vananın iki uç yüzeyi CAD'den gelir (bkz.
+   Assembly.flow_line). Önceki sürüm üçünü de modelin sınır KUTUSUNDAN tahmin
+   ediyordu ve ikisini birden kaçırıyordu:
+
+     * Kutunun merkezi aktüatör yüzünden yukarı kayıyor, borular vananın
+       deliğinden değil gövdesinin ÜSTÜNDEN geçiyordu (ölçüldü: delik ekseni
+       y=0'dayken kutu merkezi y=+59,8 mm).
+     * Kutuya gövde cıvataları da giriyor; uçlar şişiyor ve "Birleştir"
+       dendiğinde boruyla vana arasında boşluk kalıyordu.
+
+   Model mm'den dünya birimine geçiş ÖLÇÜLMEZ, okunur: parça düğümlerinin
+   ortak ebeveyni mm->m ölçeğini taşıyan montaj düğümüdür. */
+function computeFlowLine(world, center) {
+  const info = DATA.pipeline;
+  const root = state.root;
+  if (!info || !root || !(info.od_mm > 0)) return false;
+
+  const holder = (state.nodes[0] && state.nodes[0].parent) || root;
+  root.updateMatrixWorld(true);
+  const toWorld = (x, y, z) =>
+    new THREE.Vector3(x, y, z).applyMatrix4(holder.matrixWorld);
+
+  const axisMM = new THREE.Vector3().fromArray(info.axis || [0, 0, 1]).normalize();
+  const axis = axisMM.clone().transformDirection(holder.matrixWorld).normalize();
+  state.pipeOuter = info.od_mm * 0.5 *
+    (holder.getWorldScale(new THREE.Vector3()).x || 0.001);
+
+  const originMM = info.origin_mm || [0, 0, 0];
+  let faceA, faceB;
+  if (info.ends_mm && info.ends_mm.length === 2) {
+    const a = originMM.slice(), b = originMM.slice();
+    const k = [0, 1, 2].reduce((m, i) =>
+      Math.abs(axisMM.getComponent(i)) > Math.abs(axisMM.getComponent(m)) ? i : m, 0);
+    a[k] = info.ends_mm[0]; b[k] = info.ends_mm[1];
+    faceA = toWorld(a[0], a[1], a[2]);
+    faceB = toWorld(b[0], b[1], b[2]);
+  } else {
+    /* Uç yüzeyler bilinmiyorsa (yerel kütüphane modeli) eski davranış:
+       kutudan tahmin. Yanlış ama hiç boru çizmemekten iyi. */
+    const absAxis = new THREE.Vector3(Math.abs(axis.x), Math.abs(axis.y),
+                                      Math.abs(axis.z));
+    const half = world.getSize(new THREE.Vector3()).dot(absAxis) * 0.5;
+    faceA = center.clone().addScaledVector(axis, -half);
+    faceB = center.clone().addScaledVector(axis, half);
+  }
+  state.pipeAxis = axis;
+  state.flowFaceA = faceA;
+  state.flowFaceB = faceB;
+  state.flowLine = faceA.clone().add(faceB).multiplyScalar(0.5);
+  return true;
+}
+
+/* ------------------------------------------------------- boru hattı bağlamı
+   Ürünü boşlukta göstermek ne ölçeğini ne işlevini anlatıyor. Vana, çapı anma
+   ölçüsünden gelen (EN 10220) gerçek bir hatta oturuyor.
+
+   Borular modelin ÇOCUĞU DEĞİL, sahnenin çocuğudur. Sebebi parçalanma
+   animasyonu: vana hattan ayrılıp yukarı kalkarken borular yerinde kalmalı.
+   Çocuk olsalardı vanayla birlikte giderlerdi ve "kopma" hissi oluşmazdı. */
+function buildPipeline() {
+  if (!state.flowLine) return null;
+  const axis = state.pipeAxis, outer = state.pipeOuter;
+  const faceA = state.flowFaceA, faceB = state.flowFaceB;
+
+  /* Boru odanın UÇ DUVARINI delip geçecek kadar uzun. Önceki sürümde boyu
+     modelden türüyordu ve duvara ulaşmıyordu: duvardaki delik boş kalıyor,
+     kullanıcı oradan dışarıyı — yani "uzay boşluğunu" — görüyordu
+     (ölçüldü: 14 bakış açısında kaçak). */
+  const reachWall = (state.roomAxialHalf || 0) + (state.roomWallT || 0) * 3.0;
+  const fromCentre = faceB.distanceTo(faceA) * 0.5;
+  const length = Math.max(reachWall - fromCentre, state.radius * 3.2);
+
+  const group = new THREE.Group();
+  group.name = 'pipeline';
+  /* Hat BOYALI endüstriyel boru olarak kuruluyor, çıplak metal olarak değil.
+     Sebebi fiziksel: ortam bilerek koyu (metalin kontrastı oradan geliyor) ve
+     koyu bir ortamı yansıtan metal siyah çıkar — hat plastik bir hortuma
+     dönüyordu. Boyalı yüzey dağınık yansıtır, koyu ortamda bile okunur. */
+  const steel = industrialMaterial(0x6f767f, 0.30, 0.62, 165.0, 0.80);
+  /* Flanş İŞLENMİŞ bir yüzeydir: leke neredeyse kapalı. Tam genlikte (ve 240
+     frekansta) bu küçük parça benek benek oluyor, yakın planda metal değil
+     BETON gibi okunuyordu. */
+  const collar = industrialMaterial(0x979ea8, 0.62, 0.30, 90.0, 0.18);
+
+  /* --- DÜMDÜZ FLANŞLI BORU --------------------------------------------
+     Önceki sürümde her boruda ALTI KENARLI bir rakor bileziği, bir askı
+     kelepçesi ve bir ayak vardı. 48 dilimli borunun yanında 6 dilimli bir
+     bilezik yüzeyde "kesik/delik" gibi okunuyordu; kelepçe ile ayak da
+     boruyu ikinci kez kesiyordu. Hepsi kaldırıldı: boru düz bir silindir,
+     vanaya bakan ucunda DÜZGÜN YUVARLAK bir flanş var, başka hiçbir şey yok.
+
+     Boru vananın uç yüzeyine SIFIRA SIFIR dayanır ve bir pay kadar içeri
+     girer: tam temas eden iki yüzey z-savaşına girip kıl gibi bir çizgi
+     bırakıyor, o çizgi de "sızdıran boşluk" diye okunuyordu. */
+  const bite = outer * 0.06;                 // sızdırmazlık payı (içeri girer)
+  for (const [sign, face] of [[-1, faceA], [1, faceB]]) {
+    /* Boru DOLU silindir (openEnded değil): açık uçlu bir tüpte kamera
+       kesitten içeri bakıyor ve ucunda kara bir elips beliriyordu. */
+    const tube = new THREE.Mesh(
+      new THREE.CylinderGeometry(outer, outer, length, 48), steel);
+    tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
+    tube.position.copy(face)
+        .addScaledVector(axis, sign * (length * 0.5 - bite));
+    tube.castShadow = true; tube.receiveShadow = true;
+    group.add(tube);
+
+    /* Flanş: YUVARLAK (48 dilim), delik yok, boru ile aynı eksende.
+       Dış yüzü vananın uç yüzeyiyle çakışık. */
+    const fl = outer * 0.30;
+    const flange = new THREE.Mesh(
+      new THREE.CylinderGeometry(outer * 1.42, outer * 1.42, fl, 48), collar);
+    flange.quaternion.copy(tube.quaternion);
+    flange.position.copy(face).addScaledVector(axis, sign * (fl * 0.5 - bite));
+    flange.castShadow = true; flange.receiveShadow = true;
+    group.add(flange);
+  }
+
+  scene.add(group);
+  state.pipeline = group;
+  // Hattın DURAĞAN konumları: "Birleştir" tam buraya geri döner.
+  state.pipeHome = group.children.map(c => c.position.clone());
+  state.pipeCenter = state.flowLine.clone();
+  return group;
+}
+
+/* ----------------------------------------------------------- diorama
+   Ürün KAPALI bir odanın içinde duruyor: zemin, tavan ve dört duvar.
+   Boru hattı iki uç duvarı delip geçer.
+
+   Neden kapalı. Önceki sürüm açık bir şaseydi (zemin + iki uç bölmesi) ve
+   kamera yana çevrildiğinde aradan arka plandaki boşluk görünüyordu —
+   ürün bir anda "uzayda yüzen bir model"e dönüyordu. Kapalı oda bu kaçağı
+   tamamen kapatır: hangi yöne bakılırsa bakılsın karşıda bir yüzey var.
+
+   Duvarların ürünü örtmemesi iki kurala bağlı:
+     1. Yüzeyler `BackSide` — yalnız İÇERİDEN görünürler.
+     2. Kamera odanın dışına ÇIKAMAZ (bkz. `confineCamera` ve maxDistance).
+   Kamera hep içeride ve ürün hep merkezde olduğu için kamerayla ürün
+   arasına hiçbir duvar giremez.
+
+   Oda ÖLÇÜSÜ kameradan türetilir, modelden değil: kameranın gidebileceği
+   en uzak nokta odanın içinde kalmalı, yoksa duvar kameranın önüne düşer.
+   (Önceki denemede oda modele göre ölçülmüştü ve kamera arka duvarın
+   ARKASINDA kalıyordu: ölçüldü, kamera x=-0,69, duvar x=-0,36.) */
+// En uzak kamera ile duvar arasindaki pay. 1,22 odayi gereginden genis
+// tutuyordu; duvarlar uzakta kalinca olcek duygusu kayboluyor ve urun
+// boslukta duruyor gibi gorunuyordu. Kamerayi iceride tutmaya 1,05 yetiyor.
+const ROOM_CLEARANCE = 1.05;   // en uzak kamera ile duvar arasındaki pay
+
+function buildDiorama() {
+  const axis = state.pipeAxis || new THREE.Vector3(0, 0, 1);
+  const outer = state.pipeOuter || state.radius * 0.2;
+  const line = state.flowLine || state.home.clone();
+  const target = state.home;
+
+  /* Kameranın ulaşabileceği en uzak nokta: açılışta `baseDistance`,
+     patlatmada `explodedDistance` (ikisi de ÖLÇÜLMÜŞ, bkz. frame).
+     Oda bunun dışında kurulur, yoksa duvar kameranın önüne düşer. */
+  const reach = Math.max(state.baseDistance || state.radius * 3,
+                         state.explodedDistance || 0);
+  const need = reach * ROOM_CLEARANCE;
+
+  const halfAxial = Math.max(state.radius * 2.6, need);
+  const halfCross = Math.max(state.radius * 2.6, need);
+  const ceiling = Math.max(state.radius * 3.2, target.y + need);
+  const t = Math.max(outer * 0.30, state.radius * 0.05);
+  // Boru bu ölçülere göre uzatılır (bkz. buildPipeline).
+  state.roomAxialHalf = halfAxial;
+  state.roomWallT = t;
+
+  const axisIsZ = Math.abs(axis.z) > Math.abs(axis.x);
+  const halfX = axisIsZ ? halfCross : halfAxial;
+  const halfZ = axisIsZ ? halfAxial : halfCross;
+
+  /* Duvarlar KOYU. Paslanmaz çeliğin "metal" okunması parlaklıktan değil
+     KONTRASTTAN gelir: kaynaklar küçük ve parlak, çevre koyu olmalı
+     (bkz. core/hdri.py ve tests/test_hdri.py). Açık kahverengi bir oda
+     bütün ekranı doldurunca metal, yanında soluk bir plastiğe dönüyordu. */
+  const shell = industrialMaterial(0x3b322a, 0.08, 0.82, 70.0);
+  const deck = industrialMaterial(0x2b2621, 0.06, 0.88, 120.0);
+  const roof = industrialMaterial(0x241f1b, 0.05, 0.92, 60.0);
+  const frame = industrialMaterial(0x6b5137, 0.28, 0.58, 150.0);
+  for (const m of [shell, deck, roof]) m.side = THREE.BackSide;
+
+  const group = new THREE.Group();
+  group.name = 'diorama';
+
+  /* Zemin AYRI bir kutu DEĞİL: sahnede y=0'da zaten görünür bir zemin
+     düzlemi var (bkz. `ground`). İkinci bir taban kurmak iki yüzeyi tam
+     çakıştırır ve bütün zemin z-savaşına girerdi. Oda o zeminin üstüne
+     kuruluyor; `deck` yalnız ton referansı olarak duruyor. */
+  void deck;
+
+  // --- tavan ---
+  const ceil = new THREE.Mesh(
+    new THREE.BoxGeometry(halfX * 2, t, halfZ * 2), roof);
+  ceil.material = roof.clone(); ceil.material.side = THREE.FrontSide;
+  ceil.position.set(line.x, ceiling, line.z);
+  group.add(ceil);
+
+  // --- yan duvarlar (hatta PARALEL): düz, deliksiz ---
+  for (const sign of [-1, 1]) {
+    const wall = new THREE.Mesh(
+      new THREE.BoxGeometry(axisIsZ ? t : halfX * 2, ceiling,
+                            axisIsZ ? halfZ * 2 : t), shell);
+    wall.material = shell.clone(); wall.material.side = THREE.FrontSide;
+    wall.position.set(line.x + (axisIsZ ? sign * halfCross : 0), ceiling * 0.5,
+                      line.z + (axisIsZ ? 0 : sign * halfCross));
+    wall.scale.y = 1.04;          // tavan ve zeminle biniş payı
+    wall.receiveShadow = true;
+    group.add(wall);
+  }
+
+  /* --- uç duvarlar: boru bunların İÇİNDEN geçer ---
+     Delik, duvarın profiline Shape + holePath ile açılıyor; boruyu
+     dayamak yerine gerçekten delip geçirmek, hattın "bir yerden gelip bir
+     yere gittiği" hissini veren asıl ayrıntı. Deliğin merkezi artık AKIŞ
+     EKSENİNDE (eskiden sınır kutusunun merkezindeydi ve delik borunun
+     epey üstünde kalıyordu). */
+  for (const sign of [-1, 1]) {
+    /* Uç duvar yanlardan ve tavandan bir pay TAŞAR. Kenarlar tam çakışık
+       olursa birleşme yerinde tek piksellik bir dikiş kalıyor ve alçak
+       açılardan oradan dışarısı sızıyor (ölçüldü: 240x240'lık denetim
+       karesinde 1-3 piksel). */
+    const over = t * 2.0;
+    const shape = new THREE.Shape();
+    shape.moveTo(-halfCross - over, -over);
+    shape.lineTo(halfCross + over, -over);
+    shape.lineTo(halfCross + over, ceiling + over);
+    shape.lineTo(-halfCross - over, ceiling + over);
+    shape.lineTo(-halfCross - over, -over);
+    const hole = new THREE.Path();
+    /* Delik boruya DAR oturur. 1,52 x yarıçapta açılan delik borunun
+       çevresinde halka bir boşluk bırakıyordu ve alçak açılardan tam
+       oradan dışarısı görünüyordu. */
+    hole.absarc(0, line.y, outer * 1.06, 0, Math.PI * 2, true);
+    shape.holes.push(hole);
+    const panel = new THREE.Mesh(
+      new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false }), shell);
+    panel.material = shell.clone(); panel.material.side = THREE.DoubleSide;
+    /* Shape XY düzleminde kurulup +Z'de uzatılır: normali zaten Z'dedir. */
+    if (axisIsZ) {
+      panel.position.set(line.x, 0, line.z + sign * halfAxial);
+    } else {
+      panel.rotation.y = Math.PI * 0.5;
+      panel.position.set(line.x + sign * halfAxial, 0, line.z);
+    }
+    panel.receiveShadow = true;
+    group.add(panel);
+  }
+
+  // --- zemin kenar profilleri: ölçek duygusu veren tek süs ---
+  for (const sign of [-1, 1]) {
+    const beam = new THREE.Mesh(
+      new THREE.BoxGeometry(axisIsZ ? t * 1.6 : halfAxial * 2, t * 2.2,
+                            axisIsZ ? halfAxial * 2 : t * 1.6), frame);
+    beam.position.set(line.x + (axisIsZ ? sign * halfCross * 0.92 : 0), t * 0.6,
+                      line.z + (axisIsZ ? 0 : sign * halfCross * 0.92));
+    beam.castShadow = true; beam.receiveShadow = true;
+    group.add(beam);
+  }
+
+  scene.add(group);
+  state.diorama = group;
+
+  /* Kamera kafesi. İki katman: OrbitControls'ün kendi uzaklık sınırı
+     (yumuşak, tekerlek orada durur) ve her karede uygulanan kutu kelepçesi
+     (sert garanti — `dolly` kamerayı doğrudan taşıdığı için maxDistance
+     tek başına yetmez). */
+  const margin = t * 2.0;
+  state.room = new THREE.Box3(
+    new THREE.Vector3(line.x - halfX + margin, margin, line.z - halfZ + margin),
+    new THREE.Vector3(line.x + halfX - margin, ceiling - margin,
+                      line.z + halfZ - margin));
+  controls.maxDistance = Math.min(
+    halfCross - margin, halfAxial - margin, ceiling - target.y - margin) * 0.94;
+  return group;
+}
+
+/* Kamerayı odanın İÇİNDE tutar. Her karede çağrılır; duvara dayanınca
+   kamera duvar boyunca kayar, dışarı çıkamaz. */
+function confineCamera() {
+  if (!state.room) return;
+  const p = camera.position;
+  const lo = state.room.min, hi = state.room.max;
+  const x = THREE.MathUtils.clamp(p.x, lo.x, hi.x);
+  const y = THREE.MathUtils.clamp(p.y, lo.y, hi.y);
+  const z = THREE.MathUtils.clamp(p.z, lo.z, hi.z);
+  if (x !== p.x || y !== p.y || z !== p.z) p.set(x, y, z);
+}
+
+/* Endüstriyel yüzey: tek tip pürüzlülük her şeyi plastik gösteriyor.
+   Pürüzlülük nesne uzayı gürültüsüyle dalgalandırılıyor (çizik/leke
+   hissi) — ek doku dosyası inmeden, UV gerekmeden. */
+function industrialMaterial(color, metalness, roughness, grain, mottle = 1.0) {
+  /* `mottle` leke GENLİĞİdir. İşlenmiş bir yüzeyde (boru flanşı) tam genlik
+     yanlış: küçük bir parçada gürültü iri lekelere dönüşüp yüzeyi yakın
+     planda metal değil BETON gibi gösteriyordu. Boyalı boru ve duvar gibi
+     büyük, mat yüzeylerde ise leke tam da aranan şey. */
+  const mat = new THREE.MeshStandardMaterial({ color, metalness, roughness });
+  mat.onBeforeCompile = shader => {
+    shader.uniforms.uGrain = { value: grain };
+    shader.uniforms.uMottle = { value: mottle };
+    shader.vertexShader = 'varying vec3 vGrainPos;\n' + shader.vertexShader
+      .replace('#include <begin_vertex>',
+               '#include <begin_vertex>\n  vGrainPos = transformed;');
+    shader.fragmentShader = 'varying vec3 vGrainPos;\nuniform float uGrain;\n' +
+      'uniform float uMottle;\n' +
+      MICRO_NOISE + '\n' + shader.fragmentShader
+      .replace('#include <roughnessmap_fragment>',
+               '#include <roughnessmap_fragment>\n' +
+               '  float g = fbm3(vGrainPos * uGrain);\n' +
+               '  roughnessFactor = clamp(roughnessFactor' +
+               ' + (g - 0.5) * 0.30 * uMottle, 0.05, 1.0);\n' +
+               '  diffuseColor.rgb *= 1.0 - uMottle * (0.12 - 0.24 * g);');
+  };
+  return mat;
+}
+
+/* ------------------------------------------------------------------ patlatma
+   İki aşamalı sinematik:
+
+     1) KOPMA   — vana hattan ayrılıp izleyiciye doğru öne gelir. Yön, kamera
+                  bakışının boru eksenine DİK bileşenidir: parça hattın
+                  içinden geçerek değil, hattan dışarı çıkarak gelir.
+     2) PATLAMA — öne geldikten sonra bilinen eksenel ayrışma başlar.
+
+   Aşamalar kısa bir aralıkta ÜST ÜSTE biner (PULL_END > PULL_OUT): tam
+   ardışık çalıştırıldığında hareket iki ayrı animasyon gibi duruyor, binince
+   tek bir akış oluyor. */
+const PULL_OUT = 0.34;        // kopma hareketinin bittiği t
+const PULL_BLEND = 0.10;      // patlamanın erken başladığı pay
+
+function pullDirection() {
+  /* DÜZ YUKARI — kameradan BAĞIMSIZ.
+
+     Önceki sürüm vanayı "kameraya doğru" çekiyordu: yön, bakış yönünün boru
+     eksenine dik bileşeniydi. İki sorunu vardı. Birincisi, patlatılmış
+     düzen her açıdan FARKLI çıkıyordu; aynı ürün iki kez aynı görünmüyor ve
+     dizilim rastgele okunuyordu. İkincisi, kullanıcı patlatma açıkken
+     sahneyi döndürdüğünde yön bir kez hesaplanıp dondurulduğu için montaj
+     bir anda eski yönde asılı kalıyor, "parçalar kendi kendine kayıyor"
+     izlenimi veriyordu.
+
+     Hattan sökülen bir vana zaten YUKARI kaldırılır. Sabit yön hem doğru
+     hem de her seferinde aynı, hizalı düzeni veriyor. */
+  return new THREE.Vector3(0, 1, 0);
+}
+
+function applyExplode(t) {
+  const root = state.root;                 // modül düzeyindeyiz: kök durumdan
+  // --- 1. aşama: hattan kopma ---
+  if (root && state.homeRoot) {
+    const pull = THREE.MathUtils.clamp(t / PULL_OUT, 0, 1);
+    if (pull > 0 && !state.pullDir) state.pullDir = pullDirection();
+    if (pull <= 0) state.pullDir = null;
+    const dir = state.pullDir || new THREE.Vector3();
+    /* Kopma yatay değil, hafifçe YUKARI doğru: servis için hattan sökülen bir
+       vana tezgâha kaldırılır. Görsel sebebi daha da zorlayıcı — zemin artık
+       opak bir yüzey; aşağı açılan parçalar (top, oturma) zeminin ALTINA
+       iniyor ve görünmez oluyordu. Montaj kaldırılınca hepsi açıkta kalıyor. */
+    /* Kaldırma payı kürenin AŞAĞI açıldığı mesafeyi karşılamalı: küre
+       gövdenin altından çıkıyor ve montaj yükselmezse zeminin içine
+       giriyordu. */
+    root.position.copy(state.homeRoot)
+        .addScaledVector(dir, EASE(pull) * state.radius * 1.00);
+  }
+
+  // --- 2. aşama: eksenel ayrışma ---
+  const begin = Math.max(0, PULL_OUT - PULL_BLEND);
+  const blast = THREE.MathUtils.clamp((t - begin) / (1 - begin), 0, 1);
+  const maxStage = state.nodes.reduce((m, n) => Math.max(m, n.userData.st || 0), 0);
+  const span = 1 / (1 + maxStage * STAGE_DELAY);
+  for (const n of state.nodes) {
+    const st = n.userData.st || 0;
+    const start = st * STAGE_DELAY * span;
+    const local = THREE.MathUtils.clamp((blast - start) / span, 0, 1);
+    const k = EASE(local) * (n.userData.d || 0) * state.diag;
+    n.position.copy(n.userData.base).addScaledVector(n.userData.dir, k);
+  }
+
+  /* --- 3. aşama: hat da AÇILIR ---
+     Vana yerinden çıkarken borular olduğu yerde kalırsa izleyici "nereden
+     çıktı" sorusunu soruyor. Hat eksen boyunca iki yana açılıyor: bakımda
+     flanş gevşetilip boruların esnetilmesi gibi. Hat aynı zamanda biraz
+     soluyor — gözün odağı sökülen parçalarda kalmalı; tamamen gizlemek
+     bağlamı silerdi.
+
+     Açılma HER ZAMAN `state.pipeHome`'dan hesaplanıyor; artımlı toplamak
+     yuvarlama hatası biriktirir ve "Birleştir" dendiğinde hat eski yerine
+     milimetrik oturmazdı. */
+  if (state.pipeline && state.pipeHome) {
+    const open = EASE(THREE.MathUtils.clamp(t / PULL_OUT, 0, 1));
+    const axis = state.pipeAxis || new THREE.Vector3(0, 0, 1);
+    const reach = state.radius * 0.55;
+    state.pipeline.children.forEach((child, i) => {
+      const home = state.pipeHome[i];
+      if (!home) return;
+      const side = Math.sign(home.dot(axis) - state.pipeCenter.dot(axis)) || 1;
+      child.position.copy(home).addScaledVector(axis, side * open * reach);
+    });
+    const fade = 1 - 0.45 * open;
+    state.pipeline.traverse(o => {
+      if (!o.isMesh) return;
+      o.material.transparent = fade < 0.999;
+      o.material.opacity = fade;
+    });
+  }
+
+  /* Etiketler patlatmada KENDİLİĞİNDEN açılır: ortaya çıkan parçaların ne
+     olduğu ancak adlarıyla anlaşılır. Kullanıcı elle kapatmışsa ona
+     dokunulmuyor (`labelsManual`). */
+  if (!state.labelsManual) {
+    const want = t > 0.45;
+    if (want !== state.labels) {
+      state.labels = want;
+      const btn = document.getElementById('t-labels');
+      if (btn) btn.classList.toggle('on', want);
+    }
+  }
+}
+
+/* Patlatılmış montaj birleşik hâlinden kaç kat geniş yer kapladığı ÖLÇÜLÜR,
+   tahmin edilmez: mil yukarı, top aşağı, cıvatalar yanlara açıldığında DN50
+   vanada dikey uzanım 3,5 kata çıkıyordu ve sabit bir katsayı yetmiyordu.
+   Kullanıcının çevirdiği AÇI bozulmadan yalnızca uzaklık büyütülüyor. */
+function dolly(t) {
+  if (!state.baseDistance || !state.baseTarget) return;
+  /* Kamera patlatmada İKİ ŞEY yapar: geri çekilir VE bakış noktasını
+     patlamış montajın merkezine kaydırır.
+
+     İkincisi eskiden yoktu: kamera birleşik hâlin merkezine bakmaya devam
+     ediyor, montaj ise yukarı açılıyordu. Yalnız geri çekilerek bunu
+     kapatmak kadrajın yarısını boş zemine harcıyor, üstte de taşıyordu
+     (ölçüldü: patlamış yığının yarı yüksekliği 0,527; kadrajın yarısı
+     0,549 — gösterge üst kenara değiyordu).
+
+     İki uç da ÖLÇÜLMÜŞ değerlerdir; aradaki geçiş aynı yumuşatmayla. */
+  const k = EASE(THREE.MathUtils.clamp(t, 0, 1));
+  const look = state.baseTarget.clone()
+    .lerp(state.explodedCenter || state.baseTarget, k);
+  let want = THREE.MathUtils.lerp(state.baseDistance,
+                                  state.explodedDistance || state.baseDistance, k);
+  /* Geri çekilme odanın sınırını AŞAMAZ: `dolly` kamerayı doğrudan
+     taşıdığı için OrbitControls'ün maxDistance'ı burada devreye girmiyor
+     ve patlatmada kamera duvarın arkasına düşüyordu. */
+  if (controls.maxDistance < Infinity) want = Math.min(want, controls.maxDistance);
+  const dir = camera.position.clone().sub(controls.target);
+  const now = dir.length();
+  if (now < 1e-6) return;
+  controls.target.copy(look);
+  camera.position.copy(look).add(dir.multiplyScalar(want / now));
+  controls.update();
+}
+
+function applyXray() {
+  for (const n of state.nodes) {
+    const housing = (n.userData.grp === 'housing');
+    n.traverse(o => {
+      if (!o.isMesh) return;
+      const m = o.material;
+      if (state.xray && housing) {
+        m.transparent = true; m.opacity = 0.12; m.depthWrite = false;
+        m.side = THREE.DoubleSide;
+      } else {
+        m.transparent = o.userData.baseOpacity < 1;
+        m.opacity = o.userData.baseOpacity; m.depthWrite = true;
+        m.side = THREE.FrontSide;
+      }
+      m.needsUpdate = true;
+    });
+  }
+  for (const e of state.edges) e.visible = state.xray;
+  if (state.xray && state.edges.length === 0) buildEdges();
+}
+
+/* Saydam gövdenin kenar çizgileri: saydamlık tek başına formu siliyor,
+   kenarlar dış hattı geri getiriyor. */
+function buildEdges() {
+  const mat = new THREE.LineBasicMaterial({ color: 0x74899e, transparent: true,
+                                            opacity: 0.5 });
+  for (const n of state.nodes) {
+    if (n.userData.grp !== 'housing') continue;
+    n.traverse(o => {
+      if (!o.isMesh) return;
+      const line = new THREE.LineSegments(
+        new THREE.EdgesGeometry(o.geometry, 28), mat);
+      o.add(line); state.edges.push(line);
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ seçim */
+function setOpacityFor(pid) {
+  for (const n of state.nodes) {
+    const on = !pid || n.userData.pid === pid;
+    n.traverse(o => {
+      if (!o.isMesh) return;
+      o.userData.baseOpacity = on ? 1 : 0.14;
+      if (o.material.emissive) {
+        o.material.emissive.copy(o.userData.emissive);
+        if (pid && on) o.material.emissive.setRGB(0.06, 0.20, 0.30);
+      }
+    });
+  }
+  applyXray();
+}
+
+function select(pid) {
+  state.selected = (state.selected === pid) ? null : pid;
+  setOpacityFor(state.selected);
+  document.querySelectorAll('.part').forEach(el =>
+    el.classList.toggle('on', el.dataset.pid === state.selected));
+  document.querySelectorAll('.label').forEach(el =>
+    el.classList.toggle('on', el.dataset.pid === state.selected));
+  renderDetail();
+}
+
+function renderDetail() {
+  const box = document.getElementById('detail');
+  if (!box) return;
+  const p = state.selected && PART.get(state.selected);
+  if (!p) { box.hidden = true; return; }
+  box.hidden = false;
+  const bits = [`${T.qty}: ${p.qty}`, `${T.material}: ${p.material_label}`];
+  if (p.mass_g) bits.push(`${T.mass}: ${fmtMass(p.total_mass_g)}`);
+  if (p.volume_cm3) bits.push(`${p.volume_cm3} cm³`);
+  box.innerHTML =
+    `<h3>${esc(p.name)}</h3><div class="meta">${bits.map(esc).join('</span><span>')}</div>` +
+    (p.note ? `<p>${esc(p.note)}</p>` : '') +
+    (p.standard ? `<div class="std">${esc(p.standard)}</div>` : '');
+}
+
+/* ------------------------------------------------------------------ panel */
+function buildPartList() {
+  const host = document.getElementById('partlist');
+  if (!host) return;
+  let group = null;
+  for (const p of DATA.parts) {
+    if (p.group !== group) {
+      group = p.group;
+      const h = document.createElement('div');
+      h.className = 'grouphead';
+      h.textContent = DATA.groups[group] || group;
+      host.appendChild(h);
+    }
+    const b = document.createElement('button');
+    b.className = 'part'; b.dataset.pid = p.id;
+    b.innerHTML = `<span class="no">${String(p.no).padStart(2, '0')}</span>` +
+      `<span class="sw" style="background:${swatch(p.material)}"></span>` +
+      `<span class="nm">${esc(p.name)}</span>` +
+      `<span class="qt">${p.qty > 1 ? '×' + p.qty : ''} ${p.total_mass_g ? fmtMass(p.total_mass_g) : ''}</span>`;
+    b.onclick = () => select(p.id);
+    host.appendChild(b);
+  }
+}
+
+function buildMaterialBars() {
+  const host = document.getElementById('matbars');
+  if (!host) return;
+  const rows = {{ materials | tojson }};
+  const top = rows.reduce((m, r) => Math.max(m, r.mass_g), 0) || 1;
+  for (const r of rows) {
+    const d = document.createElement('div');
+    d.className = 'bar';
+    d.innerHTML = `<span class="t">${esc(r.label)}</span>` +
+      `<span class="n">${fmtMass(r.mass_g)}</span>` +
+      `<span class="track"><span class="fill" style="width:${(r.mass_g / top * 100).toFixed(1)}%"></span></span>`;
+    host.appendChild(d);
+  }
+}
+
+const SWATCH = {{ swatches | tojson }};
+function swatch(key) { return SWATCH[key] || '#8c97a6'; }
+
+/* ------------------------------------------------------------------ etiketler */
+const overlay = document.getElementById('overlay');
+const leaders = document.getElementById('leaders');
+const labelEls = [];
+
+/* Etiket YALNIZ ana parcalara.
+
+   Patlatmada 21 etiket birden aciliyordu; civata, somun, pul ve conta
+   adlari urunu okunmaz bir ok yumagina ceviriyordu. Hangi parcanin "ana"
+   oldugu sayfada tahmin EDILMEZ, pakette hesaplanir (bkz. packager_agent
+   `_mark_key_parts`): baglanti elemani ve sizdirmazlik disinda kalan,
+   montaj kutlesinin %1'inden agir parcalar. Vanada bu 21 parcadan 8'i.
+
+   Etiketi olmayan parca kaybolmuyor: sag paneldeki parca listesinde
+   duruyor ve tiklaninca yine seciliyor. */
+function buildLabels() {
+  for (const [pid, nodes] of state.parts) {
+    const p = PART.get(pid);
+    if (!p || p.key === false) continue;
+    const el = document.createElement('div');
+    el.className = 'label'; el.dataset.pid = pid;
+    el.innerHTML = `<i>${String(p.no).padStart(2, '0')}</i>${esc(p.name)}`;
+    el.onclick = () => select(pid);
+    el.style.display = 'none';
+    overlay.appendChild(el);
+    const dot = document.createElement('div');
+    dot.className = 'dot'; dot.style.display = 'none';
+    overlay.appendChild(dot);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('stroke', '#4cb3e4');
+    line.setAttribute('stroke-width', '1');
+    line.setAttribute('opacity', '0.5');
+    leaders.appendChild(line);
+    labelEls.push({ el, dot, line, node: nodes[0] });
+  }
+}
+
+const _v = new THREE.Vector3();
+
+/* Etiketleri iki OLUĞA dizer (teknik çizimlerdeki kılavuz çizgisi düzeni).
+
+   Önceki düzen etiketi parçanın yanına, ekran merkezinden dışa doğru itiyordu.
+   Patlatılmış görünümde işe yaramıyor: vananın iç parçaları ekranda birkaç
+   piksel arayla üst üste düşüyor, hepsi aynı yöne itiliyor ve tek bir okunmaz
+   sütun oluşuyordu (ölçüldü: 20 etiketin 13'ü 23 piksellik aralıklarla alt
+   alta yığılmıştı).
+
+   Oluk düzeninde her etiket, parçanın bulunduğu YANDA, kendi doğal
+   yüksekliğine en yakın boş satıra oturur; sıra bozulmaz ve kılavuz çizgisi
+   parçayı gösterir. */
+function layoutGutter(list, w, h) {
+  /* Dar ekranda TEK oluk: 390 pikselde iki sütun karşılıklı uzanıp modelin
+     üstünde buluşuyor ve etiketler birbirinin içine giriyordu. */
+  const two = w >= 720;
+  /* Alt sınır araç çubuğunun ÜSTÜ: telefonda çubuk daha kalın. */
+  const TOP = 14, BOT = h - (two ? 58 : 100);
+  const cols = [[], []];
+  for (const L of list) cols[two && L.place.x >= w * 0.5 ? 1 : 0].push(L);
+  for (let side = 0; side < 2; side++) {
+    const col = cols[side];
+    if (!col.length) continue;
+    col.sort((a, b) => a.place.y - b.place.y);
+    /* Aralık önce istenen değerde; sütun sığmıyorsa sıkıştırılır. Doğal
+       yüksekliğe yapışmaya çalışan açgözlü tarama burada yanlıştı: parçalar
+       kadraja yayıldığında sondaki etiketleri alt sınırın DIŞINA itiyordu
+       (telefonda son iki etiket araç çubuğunun altında kalıyordu). Eşit
+       aralıklı sütun her zaman sığar, sıra korunur ve kılavuz çizgisi
+       etiketin hangi parçaya ait olduğunu zaten söyler. */
+    const gap = Math.min(two ? 24 : 22, (BOT - TOP) / col.length);
+    const span = gap * (col.length - 1);
+    /* Sütunu parçaların ortasına hizala ki çizgiler kısa kalsın. */
+    const mid = col[Math.floor(col.length / 2)].place.y;
+    const y0 = Math.min(Math.max(mid - span / 2, TOP), BOT - span);
+    col.forEach((L, i) => {
+      L.place.ly = y0 + i * gap;
+      L.place.lx = side === 0 ? 14 : w - 14;
+      L.place.side = side;
+    });
+  }
+}
+
+function updateLabels() {
+  const show = state.labels;
+  const w = stage.clientWidth, h = stage.clientHeight;
+  const placed = [];
+  for (const L of labelEls) {
+    if (!show) { L.el.style.display = 'none'; L.dot.style.display = 'none';
+                 L.line.setAttribute('opacity', '0'); continue; }
+    L.node.getWorldPosition(_v);
+    _v.project(camera);
+    if (_v.z > 1) { L.el.style.display = 'none'; L.dot.style.display = 'none';
+                    L.line.setAttribute('opacity', '0'); continue; }
+    const x = (_v.x * 0.5 + 0.5) * w, y = (-_v.y * 0.5 + 0.5) * h;
+    L.place = { x, y, lx: x, ly: y, side: -1 };
+    placed.push(L);
+  }
+  layoutGutter(placed, w, h);
+  for (const L of placed) {
+    const { x, y, lx, ly, side } = L.place;
+    L.el.style.display = '';
+    /* Oluk modunda etiket kenara YASLANIR; ortalanırsa yarısı ekran dışında
+       kalıyordu. Genişlik bir kez ölçülüp saklanıyor: her karede okumak
+       tarayıcıyı yeniden yerleşime zorluyor. */
+    L.el.style.transform = side === 0 ? 'translate(0,-50%)'
+                         : side === 1 ? 'translate(-100%,-50%)'
+                         : 'translate(-50%,-50%)';
+    L.el.style.left = lx + 'px'; L.el.style.top = ly + 'px';
+    if (!L.w) L.w = L.el.offsetWidth;
+    const ex = side === 0 ? lx + (L.w || 0) : side === 1 ? lx - (L.w || 0) : lx;
+    L.dot.style.display = ''; L.dot.style.left = x + 'px'; L.dot.style.top = y + 'px';
+    L.line.setAttribute('x1', x); L.line.setAttribute('y1', y);
+    L.line.setAttribute('x2', ex); L.line.setAttribute('y2', ly);
+    L.line.setAttribute('opacity', '0.45');
+  }
+}
+
+/* ------------------------------------------------------------------ ölçek */
+const sbar = document.getElementById('sbar'), slen = document.getElementById('slen');
+function updateScale() {
+  if (!state.homeCam) return;
+  const dist = camera.position.distanceTo(controls.target);
+  const worldPerPx = 2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
+                     / stage.clientHeight;
+  const mmPerPx = worldPerPx * 1000;            // sahne metre, etiket milimetre
+  const raw = mmPerPx * 110;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const nice = [1, 2, 5, 10].map(m => m * pow).find(v => v >= raw * 0.55) || pow;
+  sbar.style.width = (nice / mmPerPx).toFixed(0) + 'px';
+  slen.textContent = nice >= 1000 ? (nice / 1000) + ' m' : nice + ' mm';
+}
+
+/* ------------------------------------------------------------------ kumanda */
+const slider = document.getElementById('slider');
+const pct = document.getElementById('pct');
+const tExplode = document.getElementById('t-explode');
+const explodeLabel = document.getElementById('explode-label');
+
+function setExplode(v, fromSlider) {
+  state.exploded = THREE.MathUtils.clamp(v, 0, 1);
+  applyExplode(state.exploded);
+  dolly(state.exploded);
+  if (!fromSlider) slider.value = Math.round(state.exploded * 100);
+  pct.textContent = Math.round(state.exploded * 100) + '%';
+  tExplode.classList.toggle('on', state.exploded > 0.01);
+  explodeLabel.textContent = state.exploded > 0.5 ? T.assemble : T.explode;
+}
+
+/* Dış erişim: patlatma durumu tarayıcıdan ölçülebilsin. Montajın birleşik
+   hâle MİLİMETRİK döndüğü ancak böyle sınanabiliyor — gözle bakarak
+   "yerine oturdu mu" sorusuna cevap verilemez. */
+window.__explode = setExplode;   // `__viewer` henüz kurulmamış olabilir
+
+slider.addEventListener('input', () => setExplode(slider.value / 100, true));
+tExplode.onclick = () => animateTo(state.exploded > 0.5 ? 0 : 1);
+
+let anim = null;
+function animateTo(target) {
+  const from = state.exploded, t0 = performance.now(), dur = 900;
+  cancelAnimationFrame(anim);
+  (function step(now) {
+    const k = Math.min(1, (now - t0) / dur);
+    setExplode(from + (target - from) * EASE(k));
+    if (k < 1) anim = requestAnimationFrame(step);
+  })(t0);
+}
+
+const tXray = document.getElementById('t-xray');
+tXray.onclick = () => { state.xray = !state.xray; tXray.classList.toggle('on', state.xray);
+                        applyXray(); };
+const tPhoto = document.getElementById('t-photo');
+tPhoto.onclick = () => setPhotoMix(state.photoMix > 0.01 ? 0 : PHOTO_MIX_DEFAULT);
+const tLabels = document.getElementById('t-labels');
+tLabels.onclick = () => { state.labels = !state.labels;
+                          state.labelsManual = true;   // artık kullanıcının
+                          tLabels.classList.toggle('on', state.labels); };
+const tSpin = document.getElementById('t-spin');
+tSpin.onclick = () => { state.spin = !state.spin; controls.autoRotate = state.spin;
+                        tSpin.classList.toggle('on', state.spin); };
+document.getElementById('t-reset').onclick = () => {
+  animateTo(0); select(null);
+  if (state.xray) tXray.click();
+  frame(1.0);
+};
+document.getElementById('t-full').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.();
+};
+const shareLabel = document.getElementById('share-label');
+document.getElementById('t-share').onclick = async () => {
+  const url = location.href;
+  try {
+    if (navigator.share && matchMedia('(pointer:coarse)').matches) {
+      await navigator.share({ title: document.title, url });
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+  } catch (e) { /* kullanıcı iptal etti ya da pano kapalı */ }
+  shareLabel.textContent = T.shared;
+  setTimeout(() => shareLabel.textContent = T.share, 1700);
+};
+
+/* parçaya tıklayarak seçme */
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+let downAt = null;
+canvas.addEventListener('pointerdown', e => downAt = { x: e.clientX, y: e.clientY });
+canvas.addEventListener('pointerup', e => {
+  if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
+  const r = canvas.getBoundingClientRect();
+  ptr.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObjects(state.nodes, true)[0];
+  if (!hit) { select(null); return; }
+  let o = hit.object;
+  while (o && !o.userData.pid) o = o.parent;
+  select(o ? o.userData.pid : null);
+});
+
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'e') tExplode.click();
+  else if (k === 'x') tXray.click();
+  else if (k === 'l') tLabels.click();
+  else if (k === 'p' && !tPhoto.hidden) tPhoto.click();
+  else if (k === 'r') document.getElementById('t-reset').click();
+  else if (k === 'f') document.getElementById('t-full').click();
+  else if (k === ' ') { e.preventDefault(); tSpin.click(); }
+  else if (/^[1-9]$/.test(k)) {
+    const p = DATA.parts[parseInt(k, 10) - 1];
+    if (p) select(p.id);
+  }
+});
+
+/* ------------------------------------------------------------------ döngü */
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  leaders.setAttribute('viewBox', `0 0 ${w} ${h}`);
+}
+addEventListener('resize', resize);
+new ResizeObserver(resize).observe(stage);
+resize();
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  confineCamera();        // kamera odanın dışına çıkamaz (bkz. buildDiorama)
+  updateLabels();
+  updateScale();
+  renderer.render(scene, camera);
+});
+
+/* ------------------------------------------------------------------ yardımcı */
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function fmtMass(g) {
+  return g >= 1000 ? (g / 1000).toFixed(2) + ' kg' : Math.round(g) + ' g';
+}
+</script>
+</body>
+</html>

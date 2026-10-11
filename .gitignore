@@ -1,0 +1,76 @@
+# ───────────────────────────── Python ─────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ───────────────────────── Secrets & config ───────────────────────
+# NEVER commit real credentials — .env.example is the template that ships.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ───────────────────────────── Node ───────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.npm/
+
+# ─────────────────── Runtime data (ajan3d pipeline) ───────────────
+# Customer photos in, generated jobs/packages out — all reproducible,
+# often hundreds of MB, and sometimes confidential. Keep them local.
+ajan3d/inbox/
+ajan3d/jobs/
+ajan3d/public/
+ajan3d/logs/
+ajan3d/Test_Fotograflari/
+*.ajan3d-job.json
+
+# Local CAD library: real supplier .glb files are not redistributable.
+ajan3d/cad_library/*
+!ajan3d/cad_library/README.md
+
+# Bundled third-party binaries (download separately — see README)
+ajan3d/tools/bin/
+
+# ─────────────────── Runtime data (parallax3d) ────────────────────
+parallax3d/output/
+parallax3d/debug/
+
+# ─────────────────── Generated / heavy artifacts ──────────────────
+*.mp4
+*.gif
+*.hdr
+*.zip
+*.exe
+*.dll
+
+# ─────────────────────────── Editors / OS ─────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
